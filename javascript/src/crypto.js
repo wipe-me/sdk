@@ -1,12 +1,15 @@
 import { argon2id } from "hash-wasm";
 import {
   BASE58BTC_ALPHABET,
-  CHUNK_SIZE,
+  DEFAULT_CRYPTO_CHUNK_BYTES,
+  MAX_CRYPTO_CHUNK_BYTES,
+  MIN_CRYPTO_CHUNK_BYTES,
   MAX_FREE_MESSAGE_BYTES,
   MESSAGE_ID_LENGTH,
   PROTOCOL_VERSION,
   SECRET_LENGTH,
 } from "./constants.js";
+import { createProgressReporter } from "./progress.js";
 
 export const CIPHER_VERSION = PROTOCOL_VERSION;
 export const DEFAULT_KDF = Object.freeze({ memoryKiB: 64 * 1024, iterations: 3, parallelism: 1 });
@@ -173,7 +176,14 @@ export async function deriveV1DeletionKey({ messageId, secret }) {
   return deletionKey;
 }
 
-function normalizeAttachment(attachment, index, id, noncePrefix) {
+export function validateCryptoChunkBytes(value = DEFAULT_CRYPTO_CHUNK_BYTES) {
+  if (!Number.isSafeInteger(value) || value < MIN_CRYPTO_CHUNK_BYTES || value > MAX_CRYPTO_CHUNK_BYTES || (value & (value - 1)) !== 0) {
+    throw new RangeError(`cryptoChunkBytes must be a power of two from ${MIN_CRYPTO_CHUNK_BYTES} through ${MAX_CRYPTO_CHUNK_BYTES}`);
+  }
+  return value;
+}
+
+function normalizeAttachment(attachment, index, id, noncePrefix, chunkSize) {
   if (!attachment || typeof attachment !== "object" || !("data" in attachment)) {
     throw new TypeError(`attachments[${index}] must contain binary data`);
   }
@@ -189,7 +199,7 @@ function normalizeAttachment(attachment, index, id, noncePrefix) {
     type: attachment.type || "application/octet-stream",
     kind: attachment.kind || "file",
     size: data.byteLength,
-    chunks: Math.ceil(data.byteLength / CHUNK_SIZE),
+    chunks: Math.ceil(data.byteLength / chunkSize),
     nonce_prefix: bytesToHex(noncePrefix),
   };
   if (Number.isInteger(attachment.width) && attachment.width > 0) metadata.width = attachment.width;
@@ -209,42 +219,51 @@ function uniqueRandomId(randomBytes, usedIds) {
   fail("random_collision", "Unable to generate a unique attachment identifier");
 }
 
-export async function createV1Envelope({ messageId, secret, message, attachments = [], _test } = {}) {
+export async function createV1Envelope({ messageId, secret, message, attachments = [], cryptoChunkBytes = DEFAULT_CRYPTO_CHUNK_BYTES, progressChunkBytes, onProgress, signal, _test } = {}) {
   if (message != null && typeof message !== "string") throw new TypeError("message must be a string");
   if (!Array.isArray(attachments)) throw new TypeError("attachments must be an array");
   const kdf = _test?.kdf ?? DEFAULT_KDF;
+  const chunkSize = validateCryptoChunkBytes(cryptoChunkBytes);
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
   const randomBytes = _test?.randomBytes ?? secureRandomBytes;
   const manifestNonce = exactRandomBytes(randomBytes, 12);
   const usedIds = new Set();
   const normalizedAttachments = attachments.map((attachment, index) => normalizeAttachment(
-    attachment, index, uniqueRandomId(randomBytes, usedIds), exactRandomBytes(randomBytes, 8),
+    attachment, index, uniqueRandomId(randomBytes, usedIds), exactRandomBytes(randomBytes, 8), chunkSize,
   ));
   const manifest = { version: 1 };
   if (message) manifest.message = message;
-  manifest.chunk_size = CHUNK_SIZE;
+  manifest.chunk_size = chunkSize;
   if (normalizedAttachments.length) manifest.attachments = normalizedAttachments.map(({ metadata }) => metadata);
 
   const { salt, encryptionRoot, deletionKey } = await deriveV1Keys(messageId, secret, kdf);
   try {
     const publicHeader = concatBytes(MAGIC, uint32(kdf.memoryKiB), uint32(kdf.iterations), Uint8Array.of(kdf.parallelism), salt, manifestNonce);
     const manifestKey = await hkdf(encryptionRoot, "wipe.me/envelope/v1/manifest");
-    const encryptedManifest = await aesGcmEncrypt(manifestKey, manifestNonce, encoder.encode(JSON.stringify(manifest)), publicHeader);
+    const manifestBytes = encoder.encode(JSON.stringify(manifest));
+    const totalPlaintextBytes = manifestBytes.length + normalizedAttachments.reduce((sum, item) => sum + item.data.length, 0);
+    const progress = createProgressReporter({ phase: "encrypting", totalBytes: totalPlaintextBytes, onProgress, progressChunkBytes });
+    const encryptedManifest = await aesGcmEncrypt(manifestKey, manifestNonce, manifestBytes, publicHeader);
+    progress.add(manifestBytes.length);
     manifestKey.fill(0);
     const parts = [publicHeader, uint32(encryptedManifest.length), encryptedManifest];
     for (let attachmentIndex = 0; attachmentIndex < normalizedAttachments.length; attachmentIndex += 1) {
       const attachment = normalizedAttachments[attachmentIndex];
       const attachmentKey = await hkdf(encryptionRoot, concatBytes(encoder.encode("wipe.me/envelope/v1/attachment/"), attachment.id));
       for (let chunkIndex = 0; chunkIndex < attachment.metadata.chunks; chunkIndex += 1) {
-        const start = chunkIndex * CHUNK_SIZE;
-        const plaintext = attachment.data.subarray(start, Math.min(start + CHUNK_SIZE, attachment.data.length));
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+        const start = chunkIndex * chunkSize;
+        const plaintext = attachment.data.subarray(start, Math.min(start + chunkSize, attachment.data.length));
         const frameHeader = concatBytes(Uint8Array.of(0x01), uint32(attachmentIndex), uint32(chunkIndex), uint32(plaintext.length));
         const nonce = concatBytes(attachment.noncePrefix, uint32(chunkIndex));
         const aad = concatBytes(MAGIC, frameHeader, uint32(attachment.metadata.chunks), attachment.id);
         parts.push(frameHeader, await aesGcmEncrypt(attachmentKey, nonce, plaintext, aad));
+        progress.add(plaintext.length, { attachmentIndex, chunkIndex });
       }
       attachmentKey.fill(0);
     }
     parts.push(Uint8Array.of(0x00));
+    progress.finish();
     const envelope = concatBytes(...parts);
     if (envelope.length > MAX_ENVELOPE_BYTES) fail("message_too_large", "The encrypted message exceeds the 3 MiB limit. Remove files and try again.");
     return {
@@ -258,9 +277,12 @@ export async function createV1Envelope({ messageId, secret, message, attachments
 }
 
 function validateManifest(manifest) {
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || manifest.version !== 1 || manifest.chunk_size !== CHUNK_SIZE) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || manifest.version !== 1) {
     fail("unsupported_manifest", "Unsupported encrypted manifest");
   }
+  let chunkSize;
+  try { chunkSize = validateCryptoChunkBytes(manifest.chunk_size); }
+  catch { fail("unsupported_manifest", "Unsupported encrypted manifest chunk_size"); }
   if (manifest.message != null && typeof manifest.message !== "string") fail("invalid_manifest", "Invalid encrypted manifest message");
   if (manifest.attachments != null && !Array.isArray(manifest.attachments)) fail("invalid_manifest", "Invalid encrypted attachment list");
   const usedIds = new Set();
@@ -271,16 +293,17 @@ function validateManifest(manifest) {
     }
     if (usedIds.has(metadata.id)) fail("invalid_manifest", "Duplicate encrypted attachment identifier");
     usedIds.add(metadata.id);
-    if (!Number.isSafeInteger(metadata.size) || metadata.size < 0 || !Number.isInteger(metadata.chunks) || metadata.chunks !== Math.ceil(metadata.size / CHUNK_SIZE)) {
+    if (!Number.isSafeInteger(metadata.size) || metadata.size < 0 || !Number.isInteger(metadata.chunks) || metadata.chunks !== Math.ceil(metadata.size / chunkSize)) {
       fail("invalid_manifest", "Invalid encrypted attachment metadata");
     }
     for (const dimension of ["width", "height"]) {
       if (metadata[dimension] != null && (!Number.isInteger(metadata[dimension]) || metadata[dimension] <= 0)) fail("invalid_manifest", "Invalid attachment dimensions");
     }
   }
+  return chunkSize;
 }
 
-export async function readV1Envelope({ messageId, secret, envelope } = {}) {
+export async function readV1Envelope({ messageId, secret, envelope, onProgress, progressChunkBytes, signal } = {}) {
   validateIdentifier(messageId, MESSAGE_ID_LENGTH, "message ID");
   validateIdentifier(secret, SECRET_LENGTH, "secret");
   const bytes = asBytes(envelope, "envelope");
@@ -306,7 +329,10 @@ export async function readV1Envelope({ messageId, secret, envelope } = {}) {
     let manifest;
     try { manifest = JSON.parse(decoder.decode(manifestPlaintext)); }
     catch (cause) { fail("decryption_failed", "Invalid secret or damaged envelope", { cause }); }
-    validateManifest(manifest);
+    const chunkSize = validateManifest(manifest);
+    const totalPlaintextBytes = manifestPlaintext.length + (manifest.attachments ?? []).reduce((sum, item) => sum + item.size, 0);
+    const progress = createProgressReporter({ phase: "decrypting", totalBytes: totalPlaintextBytes, onProgress, progressChunkBytes });
+    progress.add(manifestPlaintext.length);
 
     let offset = manifestEnd;
     const openedAttachments = [];
@@ -318,11 +344,12 @@ export async function readV1Envelope({ messageId, secret, envelope } = {}) {
       const plaintextChunks = [];
       let totalBytes = 0;
       for (let chunkIndex = 0; chunkIndex < metadata.chunks; chunkIndex += 1) {
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
         if (offset + 13 > bytes.length || bytes[offset] !== 0x01) fail("invalid_envelope", "Missing or reordered attachment frame");
         const frameHeader = bytes.subarray(offset, offset + 13);
         const frameView = new DataView(frameHeader.buffer, frameHeader.byteOffset, frameHeader.byteLength);
         const plaintextLength = frameView.getUint32(9, false);
-        if (frameView.getUint32(1, false) !== attachmentIndex || frameView.getUint32(5, false) !== chunkIndex || plaintextLength > CHUNK_SIZE || totalBytes + plaintextLength > metadata.size) {
+        if (frameView.getUint32(1, false) !== attachmentIndex || frameView.getUint32(5, false) !== chunkIndex || plaintextLength > chunkSize || totalBytes + plaintextLength > metadata.size) {
           fail("invalid_envelope", "Invalid attachment frame");
         }
         offset += 13;
@@ -333,6 +360,7 @@ export async function readV1Envelope({ messageId, secret, envelope } = {}) {
         const plaintext = await aesGcmDecrypt(attachmentKey, nonce, bytes.subarray(offset, ciphertextEnd), aad);
         plaintextChunks.push(plaintext);
         totalBytes += plaintext.length;
+        progress.add(plaintext.length, { attachmentIndex, chunkIndex });
         offset = ciphertextEnd;
       }
       attachmentKey.fill(0);
@@ -341,17 +369,19 @@ export async function readV1Envelope({ messageId, secret, envelope } = {}) {
     }
     if (offset >= bytes.length || bytes[offset] !== 0x00) fail("invalid_envelope", "Missing envelope end frame");
     if (offset + 1 !== bytes.length) fail("invalid_envelope", "Unexpected data after envelope");
+    progress.finish();
     return { manifest, attachments: openedAttachments, deletionKey, deletionKeyHeader: bytesToBase64Url(deletionKey) };
   } finally {
     encryptionRoot.fill(0);
   }
 }
 
-export function estimateV1EnvelopeBytes(messageBytes, attachmentSizes = []) {
+export function estimateV1EnvelopeBytes(messageBytes, attachmentSizes = [], cryptoChunkBytes = DEFAULT_CRYPTO_CHUNK_BYTES) {
   if (!Number.isSafeInteger(messageBytes) || messageBytes < 0 || !Array.isArray(attachmentSizes) || attachmentSizes.some((size) => !Number.isSafeInteger(size) || size < 0)) {
     throw new TypeError("messageBytes and attachmentSizes must be non-negative safe integers");
   }
+  const chunkSize = validateCryptoChunkBytes(cryptoChunkBytes);
   const encryptedManifestBytes = messageBytes + 512 + 16;
-  const framedAttachmentBytes = attachmentSizes.reduce((total, size) => total + size + Math.ceil(size / CHUNK_SIZE) * (13 + 16), 0);
+  const framedAttachmentBytes = attachmentSizes.reduce((total, size) => total + size + Math.ceil(size / chunkSize) * (13 + 16), 0);
   return 65 + encryptedManifestBytes + framedAttachmentBytes + 1;
 }

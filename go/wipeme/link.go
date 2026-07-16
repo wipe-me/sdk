@@ -14,7 +14,6 @@ const (
 	MessageIDLength   = 12
 	SecretLength      = 16
 	ProtocolVersion   = 1
-	ChunkSize         = 4 * 1024 * 1024
 )
 
 // GenerateMessageID creates a cryptographically random canonical message ID.

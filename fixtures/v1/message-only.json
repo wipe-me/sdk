@@ -12,5 +12,5 @@
   "random": { "kind": "repeated_byte", "byte_hex": "2a" },
   "attachments": [],
   "expected_production_deletion_key_base64url": "rUnoAEZg0n-6c38zdmxyLNCO5T-HQqsg_wv-f4w3NuY",
-  "expected_envelope_base64": "V0lQRU1FAAEAAABAAAAAAQHnsKMnU1nKpNxAqulNd67mWzZk7bpqURo688A/rz//5yoqKioqKioqKioqKgAAAFGF2i2ruMvJ9UjmwemeGqhZOX5P5nWTzeB2MoO3WBXtd289DLl7Fhg5cwD6uAM2aXUheTLm4ZEafRJf3u2FzOgPgEZCOTCfWPkJio/RXkBxctkA"
+  "expected_envelope_base64": "V0lQRU1FAAEAAABAAAAAAQHnsKMnU1nKpNxAqulNd67mWzZk7bpqURo688A/rz//5yoqKioqKioqKioqKgAAAFCF2i2ruMvJ9UjmwemeGqhZOX5P5nWTzeB2MoO3WBXtd289DLl7Fhg5cwD6uAM2aXUheTLm4ZEafRJe3eCDx+BGwlBBUZr64RvmXwY8fMpsLgA="
 }

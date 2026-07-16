@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	MaxFreeMessageSize = 3 * 1024 * 1024
-	MaxFreeExpiry      = 14 * 24 * time.Hour
+	MaxFreeMessageSize       = 3 * 1024 * 1024
+	MaxFreeExpiry            = 14 * 24 * time.Hour
+	DefaultProgressChunkSize = 100 * 1024
 )
 
 var (
@@ -68,11 +69,13 @@ func NewClient(options ClientOptions) (*Client, error) {
 
 // CreateMessageRequest contains an already-encrypted unified-v1 envelope and metadata.
 type CreateMessageRequest struct {
-	MessageID   string
-	Envelope    []byte
-	ContentHash string
-	DeletionKey string
-	ExpiresAt   time.Time
+	MessageID         string
+	Envelope          []byte
+	ContentHash       string
+	DeletionKey       string
+	ExpiresAt         time.Time
+	Progress          ProgressFunc
+	ProgressChunkSize int
 }
 
 type CreateMessageResult struct {
@@ -147,7 +150,8 @@ func (c *Client) CreateMessage(ctx context.Context, input CreateMessageRequest) 
 		return nil, errors.New("expiry must not exceed 14 days")
 	}
 
-	req, err := c.request(ctx, http.MethodPut, "/api/messages/"+id, bytes.NewReader(input.Envelope))
+	upload := newProgressReader(bytes.NewReader(input.Envelope), "uploading", int64(len(input.Envelope)), input.Progress, input.ProgressChunkSize)
+	req, err := c.request(ctx, http.MethodPut, "/api/messages/"+id, upload)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +174,19 @@ func (c *Client) CreateMessage(ctx context.Context, input CreateMessageRequest) 
 }
 
 func (c *Client) RetrieveMessage(ctx context.Context, messageID string) (*RetrievedMessage, error) {
+	return c.RetrieveMessageWithProgress(ctx, messageID, nil)
+}
+
+func (c *Client) RetrieveMessageWithProgress(ctx context.Context, messageID string, progress ProgressFunc) (*RetrievedMessage, error) {
+	return c.RetrieveMessageWithOptions(ctx, messageID, TransferOptions{Progress: progress})
+}
+
+type TransferOptions struct {
+	Progress          ProgressFunc
+	ProgressChunkSize int
+}
+
+func (c *Client) RetrieveMessageWithOptions(ctx context.Context, messageID string, options TransferOptions) (*RetrievedMessage, error) {
 	id, err := validateMessageID(messageID)
 	if err != nil {
 		return nil, err
@@ -186,7 +203,8 @@ func (c *Client) RetrieveMessage(ctx context.Context, messageID string) (*Retrie
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, decodeAPIError(response)
 	}
-	body, err := io.ReadAll(response.Body)
+	reader := newProgressReader(response.Body, "downloading", response.ContentLength, options.Progress, options.ProgressChunkSize)
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("read encrypted message: %w", err)
 	}
@@ -206,6 +224,31 @@ func (c *Client) RetrieveMessage(ctx context.Context, messageID string) (*Retrie
 		return nil, fmt.Errorf("invalid X-Wipe-Cipher-Version response header")
 	}
 	return &RetrievedMessage{Envelope: body, ContentHash: contentHash, CipherVersion: version}, nil
+}
+
+type progressReader struct {
+	reader                 io.Reader
+	phase                  string
+	total, processed       int64
+	callback               ProgressFunc
+	threshold, lastEmitted int64
+}
+
+func newProgressReader(source io.Reader, phase string, total int64, callback ProgressFunc, threshold int) *progressReader {
+	if threshold == 0 {
+		threshold = DefaultProgressChunkSize
+	}
+	return &progressReader{reader: source, phase: phase, total: total, callback: callback, threshold: int64(threshold), lastEmitted: -1}
+}
+
+func (reader *progressReader) Read(value []byte) (int, error) {
+	n, err := reader.reader.Read(value)
+	reader.processed += int64(n)
+	if n > 0 && reader.total >= 0 && (reader.lastEmitted < 0 || reader.processed-reader.lastEmitted >= reader.threshold || reader.processed == reader.total) {
+		emitProgress(reader.callback, reader.phase, reader.processed, reader.total, nil, nil)
+		reader.lastEmitted = reader.processed
+	}
+	return n, err
 }
 
 func (c *Client) DeleteMessage(ctx context.Context, messageID, deletionKey string) (*DeleteMessageResult, error) {

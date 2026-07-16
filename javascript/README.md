@@ -34,6 +34,12 @@ const opened = await readV1Envelope({ messageId, secret, envelope: downloaded.en
 await api.deleteMessage(messageId, bytesToBase64Url(opened.deletionKey));
 ```
 
+All long operations accept `onProgress`; events contain `phase`, `processedBytes`,
+`totalBytes`, and `percent`. Attachment writers default to 512 KiB AES-GCM frames and
+accept power-of-two `cryptoChunkBytes` from 64 KiB through 4 MiB. Transport reporting
+defaults to a logical 100 KiB threshold. Browser uploads can use
+`createXHRTransport()` for real upload progress; downloads consume response streams.
+
 The API receives only opaque encrypted bytes and derived capabilities. API failures
 throw `APIError` with `status`, stable `code`, human-readable `message`, and optional
 `retryAfter`. Free anonymous messages are validated at 3 MiB and 14 days.

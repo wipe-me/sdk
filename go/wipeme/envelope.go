@@ -19,13 +19,17 @@ import (
 )
 
 const (
-	ManifestLimit     = 16 * 1024 * 1024
-	KDFSaltSize       = 32
-	DefaultMemoryKiB  = 64 * 1024
-	DefaultIterations = 3
-	DefaultThreads    = 1
-	frameAttachment   = 1
-	frameEnd          = 0
+	ManifestLimit          = 16 * 1024 * 1024
+	KDFSaltSize            = 32
+	DefaultMemoryKiB       = 64 * 1024
+	DefaultIterations      = 3
+	DefaultThreads         = 1
+	MinCryptoChunkSize     = 64 * 1024
+	DefaultCryptoChunkSize = 512 * 1024
+	MaxCryptoChunkSize     = 4 * 1024 * 1024
+	ChunkSize              = DefaultCryptoChunkSize
+	frameAttachment        = 1
+	frameEnd               = 0
 )
 
 var envelopeMagic = [8]byte{'W', 'I', 'P', 'E', 'M', 'E', 0, ProtocolVersion}
@@ -98,17 +102,62 @@ type DecryptResult struct {
 }
 
 type encryptOptions struct {
-	random io.Reader
-	kdf    KDFParams
+	random    io.Reader
+	kdf       KDFParams
+	chunkSize int
+	progress  ProgressFunc
+}
+
+type Progress struct {
+	Phase                       string
+	ProcessedBytes, TotalBytes  int64
+	Percent                     int
+	AttachmentIndex, ChunkIndex *int
+}
+type ProgressFunc func(Progress)
+type CryptoOptions struct {
+	ChunkSize int
+	Progress  ProgressFunc
+}
+
+func validChunkSize(value int) bool {
+	return value >= MinCryptoChunkSize && value <= MaxCryptoChunkSize && value&(value-1) == 0
+}
+func emitProgress(callback ProgressFunc, phase string, processed, total int64, attachment, chunk *int) {
+	if callback == nil {
+		return
+	}
+	percent := 100
+	if total > 0 {
+		percent = int(processed * 100 / total)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		callback(Progress{phase, processed, total, percent, attachment, chunk})
+	}()
 }
 
 // Encrypt writes a production-parameter v1 envelope to output. The caller should
 // discard plaintext buffers and DeletionKey after the create request completes.
 func Encrypt(output io.Writer, messageID, secret, message string, attachments []AttachmentInput) (EncryptResult, error) {
-	return encrypt(output, messageID, secret, message, attachments, encryptOptions{random: rand.Reader, kdf: DefaultKDFParams()})
+	return EncryptWithOptions(output, messageID, secret, message, attachments, CryptoOptions{})
+}
+
+func EncryptWithOptions(output io.Writer, messageID, secret, message string, attachments []AttachmentInput, config CryptoOptions) (EncryptResult, error) {
+	chunkSize := config.ChunkSize
+	if chunkSize == 0 {
+		chunkSize = DefaultCryptoChunkSize
+	}
+	if !validChunkSize(chunkSize) {
+		return EncryptResult{}, fmt.Errorf("crypto chunk size must be a power of two from %d through %d", MinCryptoChunkSize, MaxCryptoChunkSize)
+	}
+	return encrypt(output, messageID, secret, message, attachments, encryptOptions{random: rand.Reader, kdf: DefaultKDFParams(), chunkSize: chunkSize, progress: config.Progress})
 }
 
 func encrypt(output io.Writer, messageID, secret, message string, attachments []AttachmentInput, options encryptOptions) (EncryptResult, error) {
+	if options.chunkSize == 0 {
+		options.chunkSize = DefaultCryptoChunkSize
+	}
 	if output == nil {
 		return EncryptResult{}, fmt.Errorf("output writer is required")
 	}
@@ -129,7 +178,7 @@ func encrypt(output io.Writer, messageID, secret, message string, attachments []
 	if _, err := io.ReadFull(options.random, manifestNonce); err != nil {
 		return EncryptResult{}, fmt.Errorf("generate manifest nonce: %w", err)
 	}
-	manifest := Manifest{Version: ProtocolVersion, Message: message, ChunkSize: ChunkSize}
+	manifest := Manifest{Version: ProtocolVersion, Message: message, ChunkSize: options.chunkSize}
 	rawIDs := make([][]byte, len(attachments))
 	usedIDs := make(map[string]struct{}, len(attachments))
 	var totalAttachmentSize int64
@@ -169,7 +218,7 @@ func encrypt(output io.Writer, messageID, secret, message string, attachments []
 		manifest.Attachments = append(manifest.Attachments, AttachmentMetadata{
 			ID: hex.EncodeToString(id), Name: name, Type: contentType, Kind: kind,
 			Size: attachment.Size, Width: attachment.Width, Height: attachment.Height,
-			Chunks: chunkCount(attachment.Size), NoncePrefix: hex.EncodeToString(prefix),
+			Chunks: chunkCount(attachment.Size, options.chunkSize), NoncePrefix: hex.EncodeToString(prefix),
 		})
 	}
 
@@ -201,6 +250,8 @@ func encrypt(output io.Writer, messageID, secret, message string, attachments []
 		return EncryptResult{}, err
 	}
 	manifestCiphertext := manifestAEAD.Seal(nil, manifestNonce, manifestJSON, publicHeader)
+	totalProgress := int64(len(manifestJSON)) + totalAttachmentSize
+	emitProgress(options.progress, "encrypting", int64(len(manifestJSON)), totalProgress, nil, nil)
 	if len(manifestCiphertext) > ManifestLimit {
 		return EncryptResult{}, fmt.Errorf("encrypted manifest exceeds %d bytes", ManifestLimit)
 	}
@@ -217,7 +268,7 @@ func encrypt(output io.Writer, messageID, secret, message string, attachments []
 		return EncryptResult{}, err
 	}
 	for index, attachment := range attachments {
-		if err := writeAttachment(writer, encryptionRoot, uint32(index), rawIDs[index], attachment, manifest.Attachments[index]); err != nil {
+		if err := writeAttachment(writer, encryptionRoot, uint32(index), rawIDs[index], attachment, manifest.Attachments[index], options.chunkSize, options.progress, int64(len(manifestJSON)), totalProgress); err != nil {
 			return EncryptResult{}, err
 		}
 	}
@@ -230,7 +281,7 @@ func encrypt(output io.Writer, messageID, secret, message string, attachments []
 	return result, nil
 }
 
-func writeAttachment(output io.Writer, encryptionRoot []byte, index uint32, id []byte, input AttachmentInput, metadata AttachmentMetadata) error {
+func writeAttachment(output io.Writer, encryptionRoot []byte, index uint32, id []byte, input AttachmentInput, metadata AttachmentMetadata, chunkSize int, progress ProgressFunc, processedBase, total int64) error {
 	key, err := deriveKey(encryptionRoot, append([]byte("wipe.me/envelope/v1/attachment/"), id...))
 	if err != nil {
 		return err
@@ -241,10 +292,10 @@ func writeAttachment(output io.Writer, encryptionRoot []byte, index uint32, id [
 		return err
 	}
 	prefix, _ := hex.DecodeString(metadata.NoncePrefix)
-	buffer := make([]byte, ChunkSize)
+	buffer := make([]byte, chunkSize)
 	remaining := input.Size
 	for chunk := uint32(0); chunk < metadata.Chunks; chunk++ {
-		plainLength := int64(ChunkSize)
+		plainLength := int64(chunkSize)
 		if remaining < plainLength {
 			plainLength = remaining
 		}
@@ -261,6 +312,9 @@ func writeAttachment(output io.Writer, encryptionRoot []byte, index uint32, id [
 			return err
 		}
 		remaining -= plainLength
+		processedBase += plainLength
+		ai, ci := int(index), int(chunk)
+		emitProgress(progress, "encrypting", processedBase, total, &ai, &ci)
 	}
 	var extra [1]byte
 	if n, readErr := input.Reader.Read(extra[:]); n != 0 || (readErr != nil && readErr != io.EOF) {
@@ -271,6 +325,10 @@ func writeAttachment(output io.Writer, encryptionRoot []byte, index uint32, id [
 
 // Decrypt authenticates and decrypts a complete v1 envelope.
 func Decrypt(input io.Reader, messageID, secret string) (DecryptResult, error) {
+	return DecryptWithOptions(input, messageID, secret, CryptoOptions{})
+}
+
+func DecryptWithOptions(input io.Reader, messageID, secret string, options CryptoOptions) (DecryptResult, error) {
 	if input == nil {
 		return DecryptResult{}, fmt.Errorf("input reader is required")
 	}
@@ -336,16 +394,22 @@ func Decrypt(input io.Reader, messageID, secret string) (DecryptResult, error) {
 	if err := json.Unmarshal(manifestJSON, &manifest); err != nil {
 		return DecryptResult{}, fmt.Errorf("invalid secret or damaged envelope")
 	}
-	if manifest.Version != ProtocolVersion || manifest.ChunkSize != ChunkSize {
+	if manifest.Version != ProtocolVersion || !validChunkSize(manifest.ChunkSize) {
 		return DecryptResult{}, fmt.Errorf("unsupported encrypted manifest version")
 	}
-	if err := validateManifestAttachments(manifest.Attachments); err != nil {
+	if err := validateManifestAttachments(manifest.Attachments, manifest.ChunkSize); err != nil {
 		return DecryptResult{}, err
 	}
 
 	result := DecryptResult{Manifest: manifest, Attachments: make([]DecryptedAttachment, len(manifest.Attachments))}
 	copy(result.DeletionKey[:], deletionKey)
 	result.DeletionKeyHeader = base64.RawURLEncoding.EncodeToString(result.DeletionKey[:])
+	totalProgress := int64(len(manifestJSON))
+	for _, item := range manifest.Attachments {
+		totalProgress += item.Size
+	}
+	processedProgress := int64(len(manifestJSON))
+	emitProgress(options.Progress, "decrypting", processedProgress, totalProgress, nil, nil)
 	for index, metadata := range manifest.Attachments {
 		result.Attachments[index] = DecryptedAttachment{Metadata: metadata, Data: make([]byte, 0, int(metadata.Size))}
 		id, _ := hex.DecodeString(metadata.ID)
@@ -366,7 +430,7 @@ func Decrypt(input io.Reader, messageID, secret string) (DecryptResult, error) {
 				return DecryptResult{}, fmt.Errorf("read attachment frame: %w", err)
 			}
 			plainLength := binary.BigEndian.Uint32(header[9:13])
-			if header[0] != frameAttachment || binary.BigEndian.Uint32(header[1:5]) != uint32(index) || binary.BigEndian.Uint32(header[5:9]) != chunk || plainLength > ChunkSize {
+			if header[0] != frameAttachment || binary.BigEndian.Uint32(header[1:5]) != uint32(index) || binary.BigEndian.Uint32(header[5:9]) != chunk || int(plainLength) > manifest.ChunkSize {
 				wipe(key)
 				return DecryptResult{}, fmt.Errorf("unexpected attachment frame")
 			}
@@ -385,6 +449,9 @@ func Decrypt(input io.Reader, messageID, secret string) (DecryptResult, error) {
 				return DecryptResult{}, fmt.Errorf("damaged envelope")
 			}
 			result.Attachments[index].Data = append(result.Attachments[index].Data, plaintext...)
+			processedProgress += int64(len(plaintext))
+			ai, ci := index, int(chunk)
+			emitProgress(options.Progress, "decrypting", processedProgress, totalProgress, &ai, &ci)
 		}
 		wipe(key)
 		if int64(len(result.Attachments[index].Data)) != metadata.Size {
@@ -449,7 +516,7 @@ func uniqueAttachmentID(random io.Reader, used map[string]struct{}) ([]byte, err
 	return nil, fmt.Errorf("unable to generate unique attachment ID")
 }
 
-func validateManifestAttachments(attachments []AttachmentMetadata) error {
+func validateManifestAttachments(attachments []AttachmentMetadata, chunkSize int) error {
 	used := make(map[string]struct{}, len(attachments))
 	var totalSize int64
 	for index, metadata := range attachments {
@@ -465,7 +532,7 @@ func validateManifestAttachments(attachments []AttachmentMetadata) error {
 		if err != nil || len(prefix) != 8 || hex.EncodeToString(prefix) != metadata.NoncePrefix {
 			return fmt.Errorf("invalid attachment %d nonce prefix", index)
 		}
-		if metadata.Name == "" || metadata.Type == "" || metadata.Kind == "" || metadata.Size < 0 || metadata.Chunks != chunkCount(metadata.Size) || metadata.Width < 0 || metadata.Height < 0 {
+		if metadata.Name == "" || metadata.Type == "" || metadata.Kind == "" || metadata.Size < 0 || metadata.Chunks != chunkCount(metadata.Size, chunkSize) || metadata.Width < 0 || metadata.Height < 0 {
 			return fmt.Errorf("invalid attachment %d metadata", index)
 		}
 		if metadata.Size > int64(^uint(0)>>1) {
@@ -529,11 +596,11 @@ func chunkNonce(prefix []byte, chunk uint32) []byte {
 	return binary.BigEndian.AppendUint32(nonce, chunk)
 }
 
-func chunkCount(size int64) uint32 {
+func chunkCount(size int64, chunkSize int) uint32 {
 	if size <= 0 {
 		return 0
 	}
-	return uint32((size + ChunkSize - 1) / ChunkSize)
+	return uint32((size + int64(chunkSize) - 1) / int64(chunkSize))
 }
 
 func deriveKey(rootKey, info []byte) ([]byte, error) {

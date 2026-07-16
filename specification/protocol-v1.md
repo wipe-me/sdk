@@ -50,7 +50,7 @@ The 61-byte public header is also the manifest AES-GCM AAD:
 | 61 | 4 | encrypted manifest length, tag included |
 | 65 | variable | encrypted compact UTF-8 JSON manifest |
 
-The manifest fields are `version`, optional `message`, `chunk_size` (4,194,304), and
+The manifest fields are `version`, optional `message`, `chunk_size`, and
 optional ordered `attachments`. Attachment fields are lowercase-hex `id`, `name`,
 `type`, `kind`, byte `size`, optional positive `width`/`height`, `chunks`, and
 lowercase-hex 8-byte `nonce_prefix`.
@@ -69,10 +69,15 @@ trailing bytes are invalid.
 
 ## Strict parsing
 
+Writers default `chunk_size` to 524,288 bytes and MAY select a power of two from
+65,536 through 4,194,304 bytes. Readers MUST accept every value in that range. This
+controls attachment AES-GCM frames only, not HTTP or TCP chunks. The manifest remains
+one AES-GCM operation in v1; framing a large manifest is reserved for protocol v2.
+
 Readers MUST bound KDF parameters and manifest length before allocation, recompute
 and compare the ID-derived salt before Argon2id, authenticate the manifest before
 frames, validate canonical metadata and unique IDs, reject malformed/reordered frames,
-enforce the 4 MiB chunk limit and declared totals, and reject missing end/trailing data.
+enforce the recorded safe chunk size and declared totals, and reject missing end/trailing data.
 Wrong-secret and damaged-ciphertext failures should be indistinguishable to users.
 
 ## Compatibility

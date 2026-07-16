@@ -23,3 +23,7 @@ The synchronous client supports create, atomic one-time retrieve, idempotent del
 and health operations. Free anonymous messages are validated at 3 MiB and 14 days.
 API failures raise `APIError` with `status`, stable `code`, human-readable `message`,
 and optional `retry_after` attributes.
+
+`create(..., on_progress=...)` and `retrieve(..., on_progress=...)` expose byte-based
+upload/download events. Retrieval reads in configurable logical chunks (100 KiB by
+default); physical network boundaries remain runtime-controlled.

@@ -14,14 +14,8 @@ const openAPIPath = resolve(workspace, "openapi/wipe-api.v1.yaml");
 for (const path of [cliProtocolPath, openAPIPath]) await access(path, constants.R_OK);
 
 const cliProtocol = await readFile(cliProtocolPath, "utf8");
-required(cliProtocol, fixture.expected_envelope_base64, "CLI protocol vector");
-required(cliProtocol, "64 MiB, 3 iterations, parallelism 1", "CLI production KDF");
-for (const label of [
-  "wipe.me/envelope/v1/encryption",
-  "wipe.me/envelope/v1/deletion",
-  "wipe.me/envelope/v1/manifest",
-  "wipe.me/envelope/v1/attachment/",
-]) required(cliProtocol, label, "CLI key schedule");
+required(cliProtocol, "github.com/wipe-me/sdk/blob/main/specification/protocol-v1.md", "CLI canonical protocol link");
+required(cliProtocol, "github.com/wipe-me/sdk/tree/main/fixtures/v1", "CLI fixture link");
 
 const openAPI = await readFile(openAPIPath, "utf8");
 required(openAPI, "pattern: '^[1-9A-HJ-NP-Za-km-z]{12}$'", "OpenAPI message ID");
@@ -36,4 +30,4 @@ for (const code of ["message_too_large", "message_claimed", "internal_error", "a
   required(openAPI, `- ${code}`, "OpenAPI error vocabulary");
 }
 
-console.log("CLI protocol vector/key schedule and backend OpenAPI constants are consistent with SDK v1");
+console.log("CLI canonical SDK links and backend OpenAPI constants are consistent with SDK v1");

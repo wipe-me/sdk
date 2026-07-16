@@ -1,4 +1,4 @@
-export { APIError, WipeClient } from "./api.js";
+export { APIError, WipeClient, createXHRTransport } from "./api.js";
 export {
   BASE58BTC_ALPHABET,
   CHUNK_SIZE,
@@ -58,8 +58,10 @@ export {
   createV1Envelope,
   deriveV1DeletionKey,
   estimateV1EnvelopeBytes,
+  validateCryptoChunkBytes,
   generateMessageId,
   generateSecret,
   randomBase58,
   readV1Envelope,
 } from "./crypto.js";
+export { DEFAULT_CRYPTO_CHUNK_BYTES, DEFAULT_PROGRESS_CHUNK_BYTES, MAX_CRYPTO_CHUNK_BYTES, MIN_CRYPTO_CHUNK_BYTES } from "./constants.js";

@@ -7,7 +7,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Union
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -19,6 +19,19 @@ MAX_EXPIRY_SECONDS = 14 * 24 * 60 * 60
 _CLIENT_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
 _HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _DELETION_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+DEFAULT_PROGRESS_CHUNK_BYTES = 100 * 1024
+ProgressCallback = Callable[[Mapping[str, Union[int, str]]], None]
+
+
+def _progress(callback: ProgressCallback | None, phase: str, processed: int, total: int) -> None:
+    if callback is None:
+        return
+    event = {"phase": phase, "processedBytes": processed, "totalBytes": total,
+             "percent": 100 if total == 0 else min(100, processed * 100 // total)}
+    try:
+        callback(event)
+    except Exception:
+        pass
 
 
 class APIError(Exception):
@@ -89,6 +102,7 @@ class Client:
         expires_at: int,
         content_hash: str | None = None,
         cipher_version: int = 1,
+        on_progress: ProgressCallback | None = None,
     ) -> CreateResult:
         """Store one opaque encrypted envelope.
 
@@ -128,14 +142,19 @@ class Client:
             },
         )
         result = _json_object(payload)
+        _progress(on_progress, "uploading", len(body), len(body))
         returned_id = str(result["id"])
         if returned_id != canonical_id:
             raise APIError(None, "invalid_response", "API returned an unexpected message ID")
         return CreateResult(id=returned_id, created=bool(result["created"]))
 
-    def retrieve(self, message_id: str) -> RetrievedMessage:
+    def retrieve(self, message_id: str, *, on_progress: ProgressCallback | None = None,
+                 progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES) -> RetrievedMessage:
         """Atomically claim and return an opaque encrypted envelope."""
-        payload, headers = self._request("GET", f"/api/messages/{quote(_message_id(message_id))}")
+        if not isinstance(progress_chunk_bytes, int) or progress_chunk_bytes < 1:
+            raise ValueError("progress_chunk_bytes must be positive")
+        payload, headers = self._request("GET", f"/api/messages/{quote(_message_id(message_id))}",
+                                         on_progress=on_progress, progress_chunk_bytes=progress_chunk_bytes)
         content_hash = headers.get("X-Wipe-Content-Hash")
         version = headers.get("X-Wipe-Cipher-Version")
         if not payload or not _HASH_RE.fullmatch(content_hash or "") or version != "1":
@@ -176,6 +195,8 @@ class Client:
         body: bytes | None = None,
         headers: Mapping[str, str] | None = None,
         include_client: bool = True,
+        on_progress: ProgressCallback | None = None,
+        progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES,
     ) -> tuple[bytes, Any]:
         request_headers = dict(headers or {})
         request_headers["Accept"] = "application/octet-stream, application/json"
@@ -184,7 +205,21 @@ class Client:
         request = Request(self.base_url + path, data=body, headers=request_headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                return response.read(), response.headers
+                total_header = response.headers.get("Content-Length")
+                total = int(total_header) if total_header and total_header.isdigit() else None
+                chunks, processed, last = [], 0, -1
+                while True:
+                    chunk = response.read(progress_chunk_bytes)
+                    if not chunk:
+                        break
+                    chunks.append(chunk); processed += len(chunk)
+                    if total is not None and (last < 0 or processed - last >= progress_chunk_bytes or processed == total):
+                        _progress(on_progress, "downloading", processed, total); last = processed
+                if total is not None and processed != total:
+                    raise APIError(None, "invalid_response", "Encrypted-message length did not match Content-Length")
+                if on_progress is not None and total is None:
+                    _progress(on_progress, "downloading", processed, processed)
+                return b"".join(chunks), response.headers
         except HTTPError as error:
             payload = error.read()
             raise _api_error(error.code, payload, error.headers) from None

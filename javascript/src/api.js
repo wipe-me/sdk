@@ -1,4 +1,5 @@
 import { MAX_FREE_EXPIRY_MS, MAX_FREE_MESSAGE_BYTES } from "./constants.js";
+import { createProgressReporter } from "./progress.js";
 
 const MESSAGE_ID = /^[1-9A-HJ-NP-Za-km-z]{12}$/;
 const CLIENT_ID = /^[a-z][a-z0-9._-]{0,31}$/;
@@ -29,7 +30,7 @@ export class WipeClient {
     this.now = now;
   }
 
-  async createMessage({ messageId, envelope, deletionKey, expiresAt, contentHash } = {}) {
+  async createMessage({ messageId, envelope, deletionKey, expiresAt, contentHash, onProgress, progressChunkBytes, signal } = {}) {
     validateMessageId(messageId);
     const body = asBytes(envelope);
     if (body.byteLength === 0) throw new Error("envelope must not be empty");
@@ -53,6 +54,8 @@ export class WipeClient {
         "x-wipe-expires-at": String(expiresAt),
       },
       body,
+      signal,
+      wipeProgress: { phase: "uploading", totalBytes: body.byteLength, onProgress, progressChunkBytes },
     });
     const result = await response.json();
     if (result.id !== messageId || typeof result.created !== "boolean") {
@@ -61,10 +64,36 @@ export class WipeClient {
     return result;
   }
 
-  async retrieveMessage(messageId) {
+  async retrieveMessage(messageId, { onProgress, progressChunkBytes, signal } = {}) {
     validateMessageId(messageId);
-    const response = await this.request(`/api/messages/${messageId}`);
-    const envelope = new Uint8Array(await response.arrayBuffer());
+    const response = await this.request(`/api/messages/${messageId}`, { signal });
+    const lengthHeader = response.headers.get("content-length");
+    const parsedLength = lengthHeader == null ? null : Number(lengthHeader);
+    const totalBytes = Number.isSafeInteger(parsedLength) && parsedLength >= 0 ? parsedLength : null;
+    let envelope;
+    if (response.body?.getReader) {
+      const chunks = [];
+      let received = 0;
+      const reporter = totalBytes == null ? null : createProgressReporter({ phase: "downloading", totalBytes, onProgress, progressChunkBytes });
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.byteLength;
+          reporter?.set(received);
+        }
+      } finally { reader.releaseLock(); }
+      if (totalBytes != null && received !== totalBytes) throw new APIError({ code: "invalid_response", message: "Encrypted-message length did not match Content-Length" });
+      envelope = concatChunks(chunks, received);
+      if (totalBytes == null) safeProgress(onProgress, { phase: "downloading", processedBytes: received, totalBytes: received, percent: 100 });
+      else reporter.finish();
+    } else {
+      envelope = new Uint8Array(await response.arrayBuffer());
+      if (totalBytes != null && envelope.byteLength !== totalBytes) throw new APIError({ code: "invalid_response", message: "Encrypted-message length did not match Content-Length" });
+      safeProgress(onProgress, { phase: "downloading", processedBytes: envelope.byteLength, totalBytes: totalBytes ?? envelope.byteLength, percent: 100 });
+    }
     const contentHash = response.headers.get("x-wipe-content-hash");
     const cipherVersion = Number(response.headers.get("x-wipe-cipher-version"));
     if (envelope.byteLength === 0 || !CONTENT_HASH.test(contentHash ?? "") || cipherVersion !== 1) {
@@ -100,11 +129,47 @@ export class WipeClient {
     try {
       response = await this.fetch(`${this.baseURL}${path}`, init);
     } catch (cause) {
+      if (cause?.name === "AbortError") throw cause;
       throw new APIError({ code: "transport_error", message: cause instanceof Error ? cause.message : "Network request failed" });
     }
     if (!response.ok) throw await parseAPIError(response);
     return response;
   }
+}
+
+export function createXHRTransport({ createRequest = () => new XMLHttpRequest() } = {}) {
+  return (url, init = {}) => new Promise((resolve, reject) => {
+    const request = createRequest();
+    request.open(init.method ?? "GET", url);
+    request.responseType = "arraybuffer";
+    new Headers(init.headers).forEach((value, name) => request.setRequestHeader(name, value));
+    const config = init.wipeProgress;
+    const reporter = config ? createProgressReporter(config) : null;
+    request.upload.addEventListener("progress", (event) => reporter?.set(event.loaded));
+    request.addEventListener("load", () => {
+      reporter?.finish();
+      const headers = new Headers();
+      for (const line of request.getAllResponseHeaders().trim().split(/[\r\n]+/)) {
+        const separator = line.indexOf(":");
+        if (separator > 0) headers.append(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+      }
+      resolve(new Response(request.response ?? new ArrayBuffer(0), { status: request.status, statusText: request.statusText, headers }));
+    });
+    request.addEventListener("error", () => reject(new TypeError("Network request failed")));
+    request.addEventListener("abort", () => reject(init.signal?.reason ?? new DOMException("Aborted", "AbortError")));
+    if (init.signal) {
+      if (init.signal.aborted) { request.abort(); return; }
+      init.signal.addEventListener("abort", () => request.abort(), { once: true });
+    }
+    request.send(init.body ?? null);
+  });
+}
+
+function safeProgress(callback, event) { try { callback?.(event); } catch { /* observer only */ } }
+function concatChunks(chunks, length) {
+  const result = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+  return result;
 }
 
 function validateMessageId(value) {
