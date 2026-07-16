@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wipe-me"
+version = "0.0.0.dev0"
+description = "Python SDK for the Wipe.me encrypted messaging protocol and API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Wipe.me" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Security :: Cryptography"
+]
+
+[project.urls]
+Homepage = "https://wipe.me"
+Repository = "https://github.com/wipe-me/sdk"
+Issues = "https://github.com/wipe-me/sdk/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wipeme"]

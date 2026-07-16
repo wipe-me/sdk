@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wipe.me/specification/fixtures/v1.json",
+  "type": "object",
+  "required": ["name", "protocol_version", "message_id", "secret", "kdf", "attachments", "expected_envelope_base64"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "protocol_version": { "const": 1 },
+    "message_id": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{12}$" },
+    "secret": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{16}$" },
+    "kdf": {
+      "type": "object",
+      "required": ["memory_kib", "iterations", "parallelism"],
+      "properties": {
+        "memory_kib": { "type": "integer", "minimum": 1, "maximum": 262144 },
+        "iterations": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "parallelism": { "type": "integer", "minimum": 1, "maximum": 16 }
+      },
+      "additionalProperties": false
+    },
+    "attachments": { "type": "array" },
+    "expected_envelope_base64": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

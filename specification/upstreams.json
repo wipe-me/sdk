@@ -1,0 +1,7 @@
+{
+  "protocol_version": 1,
+  "canonical_protocol": "specification/protocol-v1.md",
+  "backend_openapi": "openapi/wipe-api.v1.yaml",
+  "legacy_cli_protocol_copy": "cli/docs/protocol-v1.md",
+  "notes": "OpenAPI remains owned by the backend. The CLI protocol copy should be replaced by a generated copy or a link to a tagged SDK specification release."
+}

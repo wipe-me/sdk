@@ -1,0 +1,134 @@
+const MESSAGE_ID = /^[1-9A-HJ-NP-Za-km-z]{12}$/;
+const CLIENT_ID = /^[a-z][a-z0-9._-]{0,31}$/;
+const DELETION_KEY = /^[A-Za-z0-9_-]{43}$/;
+const CONTENT_HASH = /^[a-f0-9]{64}$/;
+
+export const MAX_FREE_MESSAGE_BYTES = 3 * 1024 * 1024;
+export const MAX_FREE_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000;
+
+export class APIError extends Error {
+  constructor({ status = null, code = "unknown_error", message = "Wipe.me API request failed", retryAfter = null }) {
+    super(message);
+    this.name = "APIError";
+    this.status = status;
+    this.code = code;
+    this.retryAfter = retryAfter;
+  }
+}
+
+export class WipeClient {
+  constructor({ baseURL = "https://wipe.me", clientId = "sdk-js", fetch: fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+    if (!CLIENT_ID.test(clientId)) throw new Error("clientId must match ^[a-z][a-z0-9._-]{0,31}$");
+    if (typeof fetchImpl !== "function") throw new Error("A Fetch API implementation is required");
+    const parsedBaseURL = new URL(baseURL);
+    if (!/^https?:$/.test(parsedBaseURL.protocol) || parsedBaseURL.username || parsedBaseURL.password || parsedBaseURL.search || parsedBaseURL.hash) {
+      throw new Error("baseURL must be an HTTP(S) URL without credentials, query, or fragment");
+    }
+    this.baseURL = parsedBaseURL.toString().replace(/\/$/, "");
+    this.clientId = clientId;
+    this.fetch = fetchImpl;
+    this.now = now;
+  }
+
+  async createMessage({ messageId, envelope, deletionKey, expiresAt, contentHash } = {}) {
+    validateMessageId(messageId);
+    const body = asBytes(envelope);
+    if (body.byteLength === 0) throw new Error("envelope must not be empty");
+    if (body.byteLength > MAX_FREE_MESSAGE_BYTES) throw new Error("envelope exceeds the 3 MiB free limit");
+    if (!DELETION_KEY.test(deletionKey ?? "")) throw new Error("deletionKey must be 43-character unpadded base64url");
+    const now = this.now();
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > now + MAX_FREE_EXPIRY_MS) {
+      throw new Error("expiresAt must be in the future and no more than 14 days away");
+    }
+    const hash = contentHash ?? await sha256Hex(body);
+    if (!CONTENT_HASH.test(hash)) throw new Error("contentHash must be a lowercase hexadecimal SHA-256 digest");
+
+    const response = await this.request(`/api/messages/${messageId}`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-wipe-content-hash": hash,
+        "x-wipe-deletion-key": deletionKey,
+        "x-wipe-cipher-version": "1",
+        "x-wipe-client": this.clientId,
+        "x-wipe-expires-at": String(expiresAt),
+      },
+      body,
+    });
+    const result = await response.json();
+    if (result.id !== messageId || typeof result.created !== "boolean") {
+      throw new APIError({ code: "invalid_response", message: "API returned an invalid creation response" });
+    }
+    return result;
+  }
+
+  async retrieveMessage(messageId) {
+    validateMessageId(messageId);
+    const response = await this.request(`/api/messages/${messageId}`);
+    const envelope = new Uint8Array(await response.arrayBuffer());
+    const contentHash = response.headers.get("x-wipe-content-hash");
+    const cipherVersion = Number(response.headers.get("x-wipe-cipher-version"));
+    if (envelope.byteLength === 0 || !CONTENT_HASH.test(contentHash ?? "") || cipherVersion !== 1) {
+      throw new APIError({ code: "invalid_response", message: "API returned invalid encrypted-message metadata" });
+    }
+    return { envelope, contentHash, cipherVersion };
+  }
+
+  async deleteMessage(messageId, deletionKey) {
+    validateMessageId(messageId);
+    if (!DELETION_KEY.test(deletionKey ?? "")) throw new Error("deletionKey must be 43-character unpadded base64url");
+    const response = await this.request(`/api/messages/${messageId}`, {
+      method: "DELETE",
+      headers: { "x-wipe-deletion-key": deletionKey },
+    });
+    const result = await response.json();
+    if (result.deleted !== true) throw new APIError({ code: "invalid_response", message: "API returned an invalid deletion response" });
+    return result;
+  }
+
+  async health() {
+    const response = await this.request("/health");
+    const result = await response.json();
+    if (result.status !== "ok") throw new APIError({ code: "invalid_response", message: "API returned an invalid health response" });
+    return result;
+  }
+
+  async request(path, init = {}) {
+    let response;
+    try {
+      response = await this.fetch(`${this.baseURL}${path}`, init);
+    } catch (cause) {
+      throw new APIError({ code: "transport_error", message: cause instanceof Error ? cause.message : "Network request failed" });
+    }
+    if (!response.ok) throw await parseAPIError(response);
+    return response;
+  }
+}
+
+function validateMessageId(value) {
+  if (!MESSAGE_ID.test(value ?? "")) throw new Error("messageId must contain 12 canonical Base58BTC characters");
+}
+
+function asBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  throw new TypeError("envelope must be a Uint8Array or ArrayBuffer");
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", value);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function parseAPIError(response) {
+  let value = {};
+  try { value = await response.json(); } catch { /* legacy/non-JSON error */ }
+  const retryValue = value.retryAfter ?? response.headers.get("retry-after");
+  const retryAfter = retryValue == null || !Number.isFinite(Number(retryValue)) ? null : Number(retryValue);
+  return new APIError({
+    status: response.status,
+    code: typeof value.code === "string" ? value.code : `http_${response.status}`,
+    message: typeof value.error === "string" ? value.error : response.statusText || `HTTP ${response.status}`,
+    retryAfter,
+  });
+}

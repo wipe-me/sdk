@@ -1,0 +1,21 @@
+{
+  "protocol_version": 1,
+  "valid": [
+    {
+      "link": "https://wipe.me/1K7m-Q2xR-8VpC#7YWH-Mfk9-JCB7-P4eG",
+      "message_id": "1K7mQ2xR8VpC",
+      "secret": "7YWHMfk9JCB7P4eG"
+    },
+    {
+      "link": "https://stage.wipe.me/path/1K7m Q2xR 8VpC#7YWH Mfk9 JCB7 P4eG",
+      "message_id": "1K7mQ2xR8VpC",
+      "secret": "7YWHMfk9JCB7P4eG"
+    }
+  ],
+  "invalid": [
+    { "value": "0K7mQ2xR8VpC", "length": 12, "reason": "0 is not Base58BTC" },
+    { "value": "1K7mQ2xR8VpO", "length": 12, "reason": "O is not Base58BTC" },
+    { "value": "1K7mQ2xR8Vp", "length": 12, "reason": "wrong length" },
+    { "value": "7YWHMfk9JCB7P4eI", "length": 16, "reason": "I is not Base58BTC" }
+  ]
+}
