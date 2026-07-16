@@ -2,7 +2,9 @@
 package wipeme
 
 import (
+	"crypto/rand"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 )
@@ -14,6 +16,35 @@ const (
 	ProtocolVersion   = 1
 	ChunkSize         = 4 * 1024 * 1024
 )
+
+// GenerateMessageID creates a cryptographically random canonical message ID.
+func GenerateMessageID() (string, error) { return randomBase58(MessageIDLength, rand.Reader) }
+
+// GenerateSecret creates a cryptographically random fragment secret.
+func GenerateSecret() (string, error) { return randomBase58(SecretLength, rand.Reader) }
+
+func randomBase58(length int, source io.Reader) (string, error) {
+	if length < 1 {
+		return "", fmt.Errorf("length must be positive")
+	}
+	result := make([]byte, 0, length)
+	batch := make([]byte, 32)
+	for len(result) < length {
+		if _, err := io.ReadFull(source, batch); err != nil {
+			return "", fmt.Errorf("generate Base58 capability: %w", err)
+		}
+		for _, value := range batch {
+			if value >= 232 {
+				continue
+			}
+			result = append(result, Base58BTCAlphabet[int(value)%len(Base58BTCAlphabet)])
+			if len(result) == length {
+				break
+			}
+		}
+	}
+	return string(result), nil
+}
 
 // NormalizeBase58 removes presentation separators and validates Base58BTC text.
 func NormalizeBase58(value string, expectedLength int) (string, error) {

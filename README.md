@@ -17,9 +17,9 @@ encrypted, self-destructing messaging protocol and API.
 
 All three language packages implement shared link/Base58 behavior and compatible
 create, retrieve, delete, and health API clients with typed errors. The JavaScript
-alpha also implements fixture-backed v1 envelope encryption, decryption, secure
-capability generation, and deletion-key derivation. Python and Go crypto adoption
-remain the next fixture-first phase.
+and Go alphas also implement fixture-backed v1 envelope encryption, decryption,
+secure capability generation, and deletion-key derivation. Python crypto adoption
+remains the next fixture-first phase.
 
 Local SDK tests should run in prebuilt language containers so contributors do not need
 to install runtimes globally. CI uses the same major runtime versions.

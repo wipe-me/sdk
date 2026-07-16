@@ -71,12 +71,13 @@ func TestCreateSendsBinaryEnvelopeAndHeaders(t *testing.T) {
 
 func TestRetrieveReturnsOpaqueBinaryAndMetadata(t *testing.T) {
 	envelope := []byte{0xde, 0xad, 0, 0xbe, 0xef}
+	const envelopeHash = "035e118749fb0672c2aef735ef0946cf51dd53853b35a80b110c4e0c0a50ccd2"
 	client, server := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("X-Wipe-Content-Hash", testHash)
+		w.Header().Set("X-Wipe-Content-Hash", envelopeHash)
 		w.Header().Set("X-Wipe-Cipher-Version", "1")
 		_, _ = w.Write(envelope)
 	})
@@ -85,8 +86,20 @@ func TestRetrieveReturnsOpaqueBinaryAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(result.Envelope, envelope) || result.ContentHash != testHash || result.CipherVersion != 1 {
+	if !bytes.Equal(result.Envelope, envelope) || result.ContentHash != envelopeHash || result.CipherVersion != 1 {
 		t.Fatalf("unexpected result %+v", result)
+	}
+}
+
+func TestRetrieveRejectsContentHashMismatch(t *testing.T) {
+	client, server := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Wipe-Content-Hash", testHash)
+		w.Header().Set("X-Wipe-Cipher-Version", "1")
+		_, _ = w.Write([]byte{1, 2, 3})
+	})
+	defer server.Close()
+	if _, err := client.RetrieveMessage(context.Background(), testID); err == nil {
+		t.Fatal("expected a content-hash mismatch")
 	}
 }
 

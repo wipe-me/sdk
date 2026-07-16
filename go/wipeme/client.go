@@ -197,6 +197,10 @@ func (c *Client) RetrieveMessage(ctx context.Context, messageID string) (*Retrie
 	if !contentHashPattern.MatchString(contentHash) {
 		return nil, errors.New("API returned an invalid X-Wipe-Content-Hash header")
 	}
+	digest := sha256.Sum256(body)
+	if hex.EncodeToString(digest[:]) != contentHash {
+		return nil, errors.New("encrypted message failed its content-hash integrity check")
+	}
 	version, err := strconv.Atoi(response.Header.Get("X-Wipe-Cipher-Version"))
 	if err != nil || version != ProtocolVersion {
 		return nil, fmt.Errorf("invalid X-Wipe-Cipher-Version response header")
