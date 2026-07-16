@@ -13,7 +13,7 @@ test("implements create, retrieve, delete, and health without the obsolete heade
     if (init.method === "PUT") return Response.json({ id, created: true }, { status: 201 });
     if (init.method === "DELETE") return Response.json({ deleted: true });
     if (url.endsWith("/health")) return Response.json({ status: "ok" });
-    return new Response(Uint8Array.of(1, 2, 3), { headers: { "x-wipe-content-hash": "b".repeat(64), "x-wipe-cipher-version": "1" } });
+    return new Response(Uint8Array.of(1, 2, 3), { headers: { "x-wipe-content-hash": "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", "x-wipe-cipher-version": "1" } });
   };
   const client = new WipeClient({ baseURL: "https://stage.wipe.me", clientId: "mobile-ios", fetch, now: () => now });
   assert.deepEqual(await client.createMessage({ messageId: id, envelope: Uint8Array.of(9), deletionKey, expiresAt: now + 1000 }), { id, created: true });
@@ -30,6 +30,16 @@ test("parses stable and legacy API errors", async () => {
   await assert.rejects(client.health(), (error) => error instanceof APIError && error.status === 429 && error.code === "message_rate_limited" && error.retryAfter === 42);
   const legacy = new WipeClient({ fetch: async () => new Response("", { status: 503, statusText: "Unavailable" }) });
   await assert.rejects(legacy.health(), (error) => error instanceof APIError && error.code === "http_503");
+});
+
+test("rejects a retrieved envelope whose declared content hash does not match", async () => {
+  const client = new WipeClient({ fetch: async () => new Response(Uint8Array.of(1, 2, 3), {
+    headers: { "x-wipe-content-hash": "b".repeat(64), "x-wipe-cipher-version": "1" },
+  }) });
+  await assert.rejects(
+    client.retrieveMessage(id),
+    (error) => error instanceof APIError && error.code === "content_hash_mismatch",
+  );
 });
 
 test("validates free limits, client identifiers, and canonical IDs", async () => {

@@ -12,13 +12,14 @@
       "type": "object",
       "required": ["memory_kib", "iterations", "parallelism"],
       "properties": {
-        "memory_kib": { "type": "integer", "minimum": 1, "maximum": 262144 },
-        "iterations": { "type": "integer", "minimum": 1, "maximum": 10 },
-        "parallelism": { "type": "integer", "minimum": 1, "maximum": 16 }
+        "memory_kib": { "type": "integer", "minimum": 64, "maximum": 65536 },
+        "iterations": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "parallelism": { "const": 1 }
       },
       "additionalProperties": false
     },
     "attachments": { "type": "array" },
+    "expected_production_deletion_key_base64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
     "expected_envelope_base64": { "type": "string", "minLength": 1 }
   },
   "additionalProperties": true

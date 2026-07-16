@@ -1,10 +1,20 @@
-export { APIError, MAX_FREE_EXPIRY_MS, MAX_FREE_MESSAGE_BYTES, WipeClient } from "./api.js";
+export { APIError, WipeClient } from "./api.js";
+export {
+  BASE58BTC_ALPHABET,
+  CHUNK_SIZE,
+  MAX_FREE_EXPIRY_MS,
+  MAX_FREE_MESSAGE_BYTES,
+  MESSAGE_ID_LENGTH,
+  PROTOCOL_VERSION,
+  SECRET_LENGTH,
+} from "./constants.js";
 
-export const BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-export const MESSAGE_ID_LENGTH = 12;
-export const SECRET_LENGTH = 16;
-export const PROTOCOL_VERSION = 1;
-export const CHUNK_SIZE = 4 * 1024 * 1024;
+import {
+  BASE58BTC_ALPHABET,
+  MESSAGE_ID_LENGTH,
+  SECRET_LENGTH,
+} from "./constants.js";
+
 
 export function normalizeBase58(value, expectedLength) {
   if (typeof value !== "string") throw new TypeError("Base58 value must be a string");
@@ -38,3 +48,18 @@ export function formatPrivateLink(site, messageId, secret) {
   url.hash = groupBase58(normalizeBase58(secret, SECRET_LENGTH));
   return url.toString();
 }
+
+export {
+  CIPHER_VERSION,
+  DEFAULT_KDF,
+  MAX_ENVELOPE_BYTES,
+  ProtocolError,
+  bytesToBase64Url,
+  createV1Envelope,
+  deriveV1DeletionKey,
+  estimateV1EnvelopeBytes,
+  generateMessageId,
+  generateSecret,
+  randomBase58,
+  readV1Envelope,
+} from "./crypto.js";

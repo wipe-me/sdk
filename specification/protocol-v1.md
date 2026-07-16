@@ -17,7 +17,9 @@ never be transmitted to the service.
 
 The production Argon2id v1.3 parameters are 65,536 KiB memory, 3 iterations,
 parallelism 1, and a 32-byte output. Production writers MUST use these parameters.
-Readers accept bounded parameters encoded in the envelope for interoperability.
+Readers accept encoded parameters only within the v1 compatibility bounds: 64 through
+65,536 KiB memory, 1 through 3 iterations, and parallelism exactly 1. This admits the
+cheap interoperability fixtures while bounding attacker-controlled work.
 
 ```text
 salt = SHA-256(UTF-8("wipe.me/envelope/v1/kdf-salt/" + canonical_id))

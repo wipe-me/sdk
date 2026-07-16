@@ -1,10 +1,9 @@
+import { MAX_FREE_EXPIRY_MS, MAX_FREE_MESSAGE_BYTES } from "./constants.js";
+
 const MESSAGE_ID = /^[1-9A-HJ-NP-Za-km-z]{12}$/;
 const CLIENT_ID = /^[a-z][a-z0-9._-]{0,31}$/;
 const DELETION_KEY = /^[A-Za-z0-9_-]{43}$/;
 const CONTENT_HASH = /^[a-f0-9]{64}$/;
-
-export const MAX_FREE_MESSAGE_BYTES = 3 * 1024 * 1024;
-export const MAX_FREE_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000;
 
 export class APIError extends Error {
   constructor({ status = null, code = "unknown_error", message = "Wipe.me API request failed", retryAfter = null }) {
@@ -70,6 +69,9 @@ export class WipeClient {
     const cipherVersion = Number(response.headers.get("x-wipe-cipher-version"));
     if (envelope.byteLength === 0 || !CONTENT_HASH.test(contentHash ?? "") || cipherVersion !== 1) {
       throw new APIError({ code: "invalid_response", message: "API returned invalid encrypted-message metadata" });
+    }
+    if (await sha256Hex(envelope) !== contentHash) {
+      throw new APIError({ code: "content_hash_mismatch", message: "Encrypted message failed its integrity check" });
     }
     return { envelope, contentHash, cipherVersion };
   }
