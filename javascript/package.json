@@ -1,6 +1,6 @@
 {
   "name": "@wipe-me/sdk",
-  "version": "0.2.0-alpha.1",
+  "version": "0.3.0-alpha.1",
   "description": "JavaScript SDK for the Wipe.me encrypted messaging protocol and API",
   "type": "module",
   "exports": {
