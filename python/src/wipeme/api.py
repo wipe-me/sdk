@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import time
@@ -68,6 +69,20 @@ class RetrievedMessage:
     cipher_version: int
 
 
+class _ProgressBody(io.BytesIO):
+    def __init__(self, body: bytes, callback: ProgressCallback | None, threshold: int) -> None:
+        super().__init__(body)
+        self._callback, self._total, self._threshold, self._last = callback, len(body), threshold, -1
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = super().read(size)
+        processed = self.tell()
+        if chunk and (self._last < 0 or processed - self._last >= self._threshold or processed == self._total):
+            _progress(self._callback, "uploading", processed, self._total)
+            self._last = processed
+        return chunk
+
+
 class Client:
     """Wipe.me API client.
 
@@ -103,6 +118,7 @@ class Client:
         content_hash: str | None = None,
         cipher_version: int = 1,
         on_progress: ProgressCallback | None = None,
+        progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES,
     ) -> CreateResult:
         """Store one opaque encrypted envelope.
 
@@ -126,15 +142,20 @@ class Client:
         digest = content_hash or hashlib.sha256(body).hexdigest()
         if not _HASH_RE.fullmatch(digest):
             raise ValueError("content_hash must be a lowercase hexadecimal SHA-256 digest")
+        if digest != hashlib.sha256(body).hexdigest():
+            raise ValueError("content_hash does not match body")
         if cipher_version != 1:
             raise ValueError("only cipher_version 1 is supported")
+        if not isinstance(progress_chunk_bytes, int) or progress_chunk_bytes < 1:
+            raise ValueError("progress_chunk_bytes must be positive")
 
         payload, _ = self._request(
             "PUT",
             f"/api/messages/{quote(canonical_id)}",
-            body=body,
+            body=_ProgressBody(body, on_progress, progress_chunk_bytes),
             headers={
                 "Content-Type": "application/octet-stream",
+                "Content-Length": str(len(body)),
                 "X-Wipe-Content-Hash": digest,
                 "X-Wipe-Deletion-Key": deletion_key,
                 "X-Wipe-Cipher-Version": "1",
@@ -142,7 +163,6 @@ class Client:
             },
         )
         result = _json_object(payload)
-        _progress(on_progress, "uploading", len(body), len(body))
         returned_id = str(result["id"])
         if returned_id != canonical_id:
             raise APIError(None, "invalid_response", "API returned an unexpected message ID")
@@ -159,6 +179,8 @@ class Client:
         version = headers.get("X-Wipe-Cipher-Version")
         if not payload or not _HASH_RE.fullmatch(content_hash or "") or version != "1":
             raise APIError(None, "invalid_response", "API returned invalid encrypted-message metadata")
+        if hashlib.sha256(payload).hexdigest() != content_hash:
+            raise APIError(None, "content_hash_mismatch", "Encrypted message failed its integrity check")
         return RetrievedMessage(
             body=payload,
             content_hash=content_hash,
@@ -192,7 +214,7 @@ class Client:
         method: str,
         path: str,
         *,
-        body: bytes | None = None,
+        body: Any = None,
         headers: Mapping[str, str] | None = None,
         include_client: bool = True,
         on_progress: ProgressCallback | None = None,

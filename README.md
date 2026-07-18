@@ -11,15 +11,14 @@ encrypted, self-destructing messaging protocol and API.
 - `specification/` is the canonical cryptographic and interoperability contract.
 - `fixtures/` contains language-neutral vectors consumed by every implementation.
 - `javascript/` is the `@wipe-me/sdk` npm package.
-- `python/` is the future `wipe-me` PyPI distribution (`import wipeme`).
+- `python/` is the `wipe-me` PyPI distribution (`import wipeme`).
 - `go/` is the `github.com/wipe-me/sdk/go` module.
 - `scripts/` contains checks for copies maintained in the web and CLI repositories.
 
 All three language packages implement shared link/Base58 behavior and compatible
-create, retrieve, delete, and health API clients with typed errors. The JavaScript
-and Go alphas also implement fixture-backed v1 envelope encryption, decryption,
-secure capability generation, and deletion-key derivation. Python crypto adoption
-remains the next fixture-first phase.
+create, retrieve, delete, and health API clients with typed errors. All three 0.3
+alphas implement fixture-backed v1 envelope encryption, decryption, configurable
+framing, byte progress, secure capability generation, and deletion-key derivation.
 
 Local SDK tests should run in prebuilt language containers so contributors do not need
 to install runtimes globally. CI uses the same major runtime versions.
@@ -34,3 +33,6 @@ node scripts/check-workspace-consistency.mjs /path/to/Wipe.me-workspace
 ```
 
 Apache-2.0 licensed. See [LICENSE](LICENSE).
+
+See [the synchronized SDK version matrix](specification/version-matrix.md) for the
+cross-language capability baseline.

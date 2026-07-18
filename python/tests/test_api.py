@@ -46,7 +46,8 @@ class Handler(BaseHTTPRequestHandler):
             body = b"opaque\x00ciphertext"
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("X-Wipe-Content-Hash", hashlib.sha256(body).hexdigest())
+            content_hash = "0" * 64 if self.path.endswith("2K7mQ2xR8VpC") else hashlib.sha256(body).hexdigest()
+            self.send_header("X-Wipe-Content-Hash", content_hash)
             self.send_header("X-Wipe-Cipher-Version", "1")
         self.end_headers()
         self.wfile.write(body)
@@ -99,6 +100,22 @@ class APITests(unittest.TestCase):
         self.assertEqual(result.body, b"opaque\x00ciphertext")
         self.assertEqual(result.cipher_version, 1)
         self.assertEqual(result.content_hash, hashlib.sha256(result.body).hexdigest())
+
+    def test_retrieve_rejects_content_hash_mismatch(self):
+        with self.assertRaises(APIError) as caught:
+            self.client.retrieve("2K7mQ2xR8VpC")
+        self.assertEqual(caught.exception.code, "content_hash_mismatch")
+
+    def test_upload_reports_actual_monotonic_bytes(self):
+        events = []
+        body = b"x" * 250_000
+        self.client.create(MESSAGE_ID, body, deletion_key=DELETION_KEY,
+                           expires_at=int(time.time() * 1000) + 60_000,
+                           on_progress=events.append, progress_chunk_bytes=50_000)
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["processedBytes"], len(body))
+        self.assertEqual(events[-1]["percent"], 100)
+        self.assertEqual([event["processedBytes"] for event in events], sorted(event["processedBytes"] for event in events))
 
     def test_delete_raises_typed_api_error(self):
         with self.assertRaises(APIError) as caught:

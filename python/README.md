@@ -1,22 +1,29 @@
 # wipe-me
 
-The official Python SDK for Wipe.me. This package is not yet published to PyPI.
+The official Python SDK for Wipe.me. The synchronized 0.3 alpha supports the same
+v1 encryption, configurable framing, progress, link, and HTTP operations as the
+JavaScript and Go SDKs.
+
+```bash
+python -m pip install --pre wipe-me==0.3.0a1
+```
 
 ```python
 import time
-from wipeme import Client, parse_private_link
+from wipeme import Client, decrypt, encrypt, generate_message_id, generate_secret
 
 api = Client("https://wipe.me", client_id="sdk-python")
-health = api.health()
-
-# `envelope` is already encrypted locally; the API never receives the URL secret.
+message_id, secret = generate_message_id(), generate_secret()
+encrypted = encrypt(message_id, secret, "Private hello", on_progress=print)
 created = api.create(
-    "1K7mQ2xR8VpC",
-    envelope,
-    deletion_key=derived_deletion_key,
+    message_id,
+    encrypted.envelope,
+    deletion_key=encrypted.deletion_key_header,
+    content_hash=encrypted.content_hash,
     expires_at=int(time.time() * 1000) + 24 * 60 * 60 * 1000,
 )
-download = api.retrieve("1K7mQ2xR8VpC")
+download = api.retrieve(message_id)
+opened = decrypt(download.body, message_id, secret)
 ```
 
 The synchronous client supports create, atomic one-time retrieve, idempotent delete,
@@ -27,3 +34,6 @@ and optional `retry_after` attributes.
 `create(..., on_progress=...)` and `retrieve(..., on_progress=...)` expose byte-based
 upload/download events. Retrieval reads in configurable logical chunks (100 KiB by
 default); physical network boundaries remain runtime-controlled.
+
+Crypto uses Argon2id, HKDF-SHA-256, and AES-256-GCM through `argon2-cffi` and
+PyCA `cryptography`. The fragment secret remains local and is never sent to the API.

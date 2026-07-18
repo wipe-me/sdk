@@ -3,7 +3,7 @@
 Go module for Wipe.me client-side encryption, private-link capabilities, and the
 opaque-message HTTP API, published with module-prefixed semantic-version tags.
 
-Current pre-release: `github.com/wipe-me/sdk/go@v0.2.0-alpha.1`.
+Current synchronized pre-release: `github.com/wipe-me/sdk/go@v0.3.0-alpha.1`.
 
 ```go
 var envelope bytes.Buffer
