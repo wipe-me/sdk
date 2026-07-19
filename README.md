@@ -16,9 +16,9 @@ encrypted, self-destructing messaging protocol and API.
 - `scripts/` contains checks for copies maintained in the web and CLI repositories.
 
 All three language packages implement shared link/Base58 behavior and compatible
-create, retrieve, delete, and health API clients with typed errors. All three 0.3
-alphas implement fixture-backed v1 envelope encryption, decryption, configurable
-framing, byte progress, secure capability generation, and deletion-key derivation.
+API clients with typed errors. All three 0.4 alphas implement fixture-backed v1
+envelope crypto, configurable framing, byte progress, secure capabilities, effective
+limit discovery, bounded network measurement, and privacy-safe performance reporting.
 
 Local SDK tests should run in prebuilt language containers so contributors do not need
 to install runtimes globally. CI uses the same major runtime versions.
@@ -35,4 +35,5 @@ node scripts/check-workspace-consistency.mjs /path/to/Wipe.me-workspace
 Apache-2.0 licensed. See [LICENSE](LICENSE).
 
 See [the synchronized SDK version matrix](specification/version-matrix.md) for the
-cross-language capability baseline.
+cross-language capability baseline and [API v1 client capabilities](specification/capabilities-v1.md)
+for limits, measurement, retrieval metadata, and telemetry behavior.

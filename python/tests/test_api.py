@@ -38,6 +38,19 @@ class Handler(BaseHTTPRequestHandler):
             body = b'{"status":"ok"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+        elif self.path == "/api/limits":
+            body = json.dumps({"authenticated": False, "plan": "anonymous", "limits": {
+                "messageBytes": 3145728, "maxExpirySeconds": 1209600, "devices": 0, "apiKeys": 0,
+                "messagesPerMinute": 3, "uploadBytesPerHour": 31457280,
+                "speedTestBytesPerRequest": 1048576, "speedTestBytesPerHour": 10485760}, "usage": None}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        elif self.path == "/api/network-test/download?bytes=64":
+            body = bytes(64)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "64")
+            self.send_header("Cache-Control", "no-store")
         elif self.path.endswith("/missing"):
             body = b'{"error":"gone","code":"message_not_found"}'
             self.send_response(404)
@@ -51,6 +64,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Wipe-Cipher-Version", "1")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self._record(body)
+        if self.path == "/api/network-test/upload":
+            self.send_response(200); result = {"receivedBytes": len(body)}
+        elif self.path == "/api/performance-reports":
+            self.send_response(201); result = {"accepted": True, "id": "123e4567-e89b-42d3-a456-426614174000"}
+        else:
+            self.send_response(404); result = {"code": "not_found"}
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode())
 
     def do_DELETE(self):
         self._record()
@@ -96,10 +122,13 @@ class APITests(unittest.TestCase):
         self.assertNotIn("X-Wipe-On-Read", headers)
 
     def test_retrieve_returns_binary_metadata(self):
-        result = self.client.retrieve(MESSAGE_ID)
+        headers = []
+        result = self.client.retrieve(MESSAGE_ID, on_headers=headers.append)
         self.assertEqual(result.body, b"opaque\x00ciphertext")
         self.assertEqual(result.cipher_version, 1)
         self.assertEqual(result.content_hash, hashlib.sha256(result.body).hexdigest())
+        self.assertEqual(headers[0]["contentHash"], result.content_hash)
+        self.assertEqual(headers[0]["cipherVersion"], 1)
 
     def test_retrieve_rejects_content_hash_mismatch(self):
         with self.assertRaises(APIError) as caught:
@@ -144,6 +173,34 @@ class APITests(unittest.TestCase):
         Client("http://example.invalid", client_id="mobile-android.v2")
         with self.assertRaises(ValueError):
             Client("http://example.invalid", client_id="Mobile Android")
+
+    def test_limits_and_network_tests(self):
+        self.assertEqual(self.client.limits()["limits"]["messageBytes"], 3145728)
+        upload = self.client.test_upload_speed(bytes(32))
+        self.assertEqual(upload.received_bytes, 32)
+        self.assertGreater(upload.bytes_per_second, 0)
+        download = self.client.test_download_speed(64)
+        self.assertEqual(download.received_bytes, 64)
+        self.assertEqual(len(download.data), 64)
+        self.assertGreater(download.bytes_per_second, 0)
+        with self.assertRaises(ValueError):
+            self.client.test_download_speed(1048577)
+
+    def test_performance_reports_are_validated_before_submission(self):
+        report = {
+            "schemaVersion": 1, "flow": "create", "result": "success",
+            "encryptedBytes": 65536, "plaintextBytes": 64000,
+            "estimated": {"encryptMs": 210, "uploadMs": 800, "totalMs": 1010},
+            "actual": {"encryptMs": 225, "uploadMs": 920, "totalMs": 1145},
+            "completedBytes": {"upload": 65536},
+            "networkEstimate": {"uploadBytesPerSecond": 81920, "sampleAgeMs": 12000},
+            "cryptoEstimate": {"encryptBytesPerSecond": 5000000, "sampleAgeMs": 60000},
+            "estimateModel": "client-baseline-v1",
+            "client": {"kind": "sdk-python", "version": "0.4.0", "platform": "server"},
+        }
+        self.assertTrue(self.client.submit_performance_report(report).accepted)
+        with self.assertRaises(ValueError):
+            self.client.submit_performance_report({**report, "messageId": MESSAGE_ID})
 
 
 if __name__ == "__main__":

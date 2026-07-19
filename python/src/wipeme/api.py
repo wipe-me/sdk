@@ -17,9 +17,17 @@ from .link import MESSAGE_ID_LENGTH, normalize_base58
 
 MAX_MESSAGE_BYTES = 3 * 1024 * 1024
 MAX_EXPIRY_SECONDS = 14 * 24 * 60 * 60
+MAX_SPEED_TEST_BYTES = 1024 * 1024
+MAX_PERFORMANCE_REPORT_BYTES = 8 * 1024
+MAX_REPORTED_BYTES = 1024 * 1024 * 1024
+MAX_REPORTED_DURATION_MS = 24 * 60 * 60 * 1000
+MAX_REPORTED_BPS = 2**40
 _CLIENT_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
 _HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _DELETION_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 DEFAULT_PROGRESS_CHUNK_BYTES = 100 * 1024
 ProgressCallback = Callable[[Mapping[str, Union[int, str]]], None]
 
@@ -67,6 +75,24 @@ class RetrievedMessage:
     body: bytes
     content_hash: str
     cipher_version: int
+
+
+@dataclass(frozen=True)
+class SpeedTestResult:
+    received_bytes: int
+    elapsed_seconds: float
+    bytes_per_second: int
+
+
+@dataclass(frozen=True)
+class DownloadTestResult(SpeedTestResult):
+    data: bytes
+
+
+@dataclass(frozen=True)
+class PerformanceReportResult:
+    accepted: bool
+    id: str
 
 
 class _ProgressBody(io.BytesIO):
@@ -168,13 +194,28 @@ class Client:
             raise APIError(None, "invalid_response", "API returned an unexpected message ID")
         return CreateResult(id=returned_id, created=bool(result["created"]))
 
-    def retrieve(self, message_id: str, *, on_progress: ProgressCallback | None = None,
+    def retrieve(self, message_id: str, *, on_headers: Callable[[Mapping[str, Any]], None] | None = None,
+                 on_progress: ProgressCallback | None = None,
                  progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES) -> RetrievedMessage:
         """Atomically claim and return an opaque encrypted envelope."""
         if not isinstance(progress_chunk_bytes, int) or progress_chunk_bytes < 1:
             raise ValueError("progress_chunk_bytes must be positive")
+        def inspect_headers(headers: Any) -> None:
+            content_hash = headers.get("X-Wipe-Content-Hash")
+            version = headers.get("X-Wipe-Cipher-Version")
+            if not _HASH_RE.fullmatch(content_hash or "") or version != "1":
+                raise APIError(None, "invalid_response", "API returned invalid encrypted-message metadata")
+            if on_headers is not None:
+                length = headers.get("Content-Length")
+                metadata = {"totalBytes": int(length) if length and length.isdigit() else None,
+                            "contentHash": content_hash, "cipherVersion": 1}
+                try:
+                    on_headers(metadata)
+                except Exception:
+                    pass
         payload, headers = self._request("GET", f"/api/messages/{quote(_message_id(message_id))}",
-                                         on_progress=on_progress, progress_chunk_bytes=progress_chunk_bytes)
+                                         on_headers=inspect_headers, on_progress=on_progress,
+                                         progress_chunk_bytes=progress_chunk_bytes)
         content_hash = headers.get("X-Wipe-Content-Hash")
         version = headers.get("X-Wipe-Cipher-Version")
         if not payload or not _HASH_RE.fullmatch(content_hash or "") or version != "1":
@@ -203,11 +244,68 @@ class Client:
         payload, _ = self._request("GET", "/health", include_client=False)
         return _json_object(payload)
 
+    def limits(self) -> Mapping[str, Any]:
+        """Return the server-authoritative effective limits for this caller."""
+        payload, _ = self._request("GET", "/api/limits", include_client=False)
+        result = _json_object(payload)
+        names = {"messageBytes", "maxExpirySeconds", "devices", "apiKeys", "messagesPerMinute",
+                 "uploadBytesPerHour", "speedTestBytesPerRequest", "speedTestBytesPerHour"}
+        limits = result.get("limits")
+        if (set(result) != {"authenticated", "plan", "limits", "usage"}
+                or not isinstance(result["authenticated"], bool) or not isinstance(result["plan"], str)
+                or not isinstance(limits, dict) or set(limits) != names
+                or any(not _integer(limits[name], 0, 2**63 - 1) for name in names)):
+            raise APIError(None, "invalid_response", "API returned an invalid limits response")
+        return result
+
+    def test_upload_speed(self, sample: bytes, *, on_progress: ProgressCallback | None = None,
+                          progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES) -> SpeedTestResult:
+        """Upload and discard a bounded sample, returning a locally measured rate."""
+        if not isinstance(sample, bytes):
+            raise TypeError("sample must be bytes")
+        _speed_test_size(len(sample))
+        started = time.perf_counter()
+        payload, _ = self._request("POST", "/api/network-test/upload",
+            body=_ProgressBody(sample, on_progress, progress_chunk_bytes), include_client=False,
+            headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(sample))})
+        elapsed = max(time.perf_counter() - started, 1e-9)
+        result = _json_object(payload)
+        if result.get("receivedBytes") != len(sample):
+            raise APIError(None, "invalid_response", "API returned an invalid upload-test response")
+        return SpeedTestResult(len(sample), elapsed, round(len(sample) / elapsed))
+
+    def test_download_speed(self, size: int, *, on_progress: ProgressCallback | None = None,
+                            progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES) -> DownloadTestResult:
+        """Download a bounded generated sample, returning a locally measured rate."""
+        _speed_test_size(size)
+        started = time.perf_counter()
+        payload, headers = self._request("GET", f"/api/network-test/download?bytes={size}",
+            include_client=False, on_progress=on_progress, progress_chunk_bytes=progress_chunk_bytes)
+        elapsed = max(time.perf_counter() - started, 1e-9)
+        if headers.get("Content-Length") != str(size) or headers.get("Cache-Control") != "no-store" or len(payload) != size:
+            raise APIError(None, "invalid_response", "API returned invalid download-test metadata")
+        return DownloadTestResult(len(payload), elapsed, round(len(payload) / elapsed), payload)
+
+    def submit_performance_report(self, report: Mapping[str, Any]) -> PerformanceReportResult:
+        """Submit one strictly bounded privacy-safe estimate-versus-actual report."""
+        _validate_performance_report(report)
+        body = json.dumps(report, separators=(",", ":"), ensure_ascii=True).encode()
+        if len(body) > MAX_PERFORMANCE_REPORT_BYTES:
+            raise ValueError("performance report exceeds 8 KiB")
+        payload, _ = self._request("POST", "/api/performance-reports", body=body, include_client=False,
+                                   headers={"Content-Type": "application/json", "Content-Length": str(len(body))})
+        result = _json_object(payload)
+        if result.get("accepted") is not True or not _UUID_RE.fullmatch(str(result.get("id", ""))):
+            raise APIError(None, "invalid_response", "API returned an invalid performance-report response")
+        return PerformanceReportResult(True, str(result["id"]))
+
     # Names matching the OpenAPI operation IDs, alongside the concise idiomatic API.
     create_message = create
     retrieve_message = retrieve
     delete_message = delete
     get_health = health
+    get_limits = limits
+    create_performance_report = submit_performance_report
 
     def _request(
         self,
@@ -218,6 +316,7 @@ class Client:
         headers: Mapping[str, str] | None = None,
         include_client: bool = True,
         on_progress: ProgressCallback | None = None,
+        on_headers: Callable[[Any], None] | None = None,
         progress_chunk_bytes: int = DEFAULT_PROGRESS_CHUNK_BYTES,
     ) -> tuple[bytes, Any]:
         request_headers = dict(headers or {})
@@ -227,6 +326,8 @@ class Client:
         request = Request(self.base_url + path, data=body, headers=request_headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                if on_headers is not None:
+                    on_headers(response.headers)
                 total_header = response.headers.get("Content-Length")
                 total = int(total_header) if total_header and total_header.isdigit() else None
                 chunks, processed, last = [], 0, -1
@@ -251,6 +352,69 @@ class Client:
 
 def _message_id(value: str) -> str:
     return normalize_base58(value, MESSAGE_ID_LENGTH)
+
+
+def _speed_test_size(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > MAX_SPEED_TEST_BYTES:
+        raise ValueError(f"speed-test size must be between 1 and {MAX_SPEED_TEST_BYTES} bytes")
+
+
+def _integer(value: Any, minimum: int, maximum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+
+
+def _object_keys(value: Any, allowed: set[str]) -> bool:
+    return isinstance(value, Mapping) and set(value).issubset(allowed)
+
+
+def _validate_performance_report(value: Mapping[str, Any]) -> None:
+    root = {"schemaVersion", "flow", "result", "encryptedBytes", "plaintextBytes", "estimated", "actual",
+            "completedBytes", "networkEstimate", "cryptoEstimate", "estimateModel", "client"}
+    if not _object_keys(value, root) or value.get("schemaVersion") != 1 or value.get("flow") not in {"create", "open"}:
+        raise ValueError("invalid performance report")
+    create = value["flow"] == "create"
+    results = {"success", "cancelled", "transport_error"} | (set() if create else {"integrity_error", "decryption_error"})
+    if value.get("result") not in results or not _integer(value.get("encryptedBytes"), 1, MAX_REPORTED_BYTES):
+        raise ValueError("invalid performance report")
+    if "plaintextBytes" in value and not _integer(value["plaintextBytes"], 0, MAX_REPORTED_BYTES):
+        raise ValueError("invalid performance report")
+    _validate_timings(value.get("estimated"), create, True)
+    _validate_timings(value.get("actual"), create, value["result"] == "success")
+    _validate_estimate(value.get("networkEstimate"), "uploadBytesPerSecond" if create else "downloadBytesPerSecond")
+    _validate_estimate(value.get("cryptoEstimate"), "encryptBytesPerSecond" if create else "decryptBytesPerSecond")
+    completed_key = "upload" if create else "download"
+    completed = value.get("completedBytes")
+    if completed is not None and (not _object_keys(completed, {completed_key}) or completed_key not in completed
+                                  or not _integer(completed[completed_key], 0, value["encryptedBytes"])):
+        raise ValueError("invalid performance report")
+    client = value.get("client")
+    if (not _MODEL_RE.fullmatch(str(value.get("estimateModel", "")))
+            or not _object_keys(client, {"kind", "version", "platform", "browserFamily"})
+            or not _CLIENT_RE.fullmatch(str(client.get("kind", "")))
+            or not _VERSION_RE.fullmatch(str(client.get("version", "")))
+            or client.get("platform") not in {"mobile", "desktop", "server", "unknown"}
+            or ("browserFamily" in client and client["browserFamily"] not in {"chrome", "firefox", "safari", "edge", "other", "unknown"})):
+        raise ValueError("invalid performance report")
+
+
+def _validate_timings(value: Any, create: bool, required: bool) -> None:
+    phases = {"encryptMs", "uploadMs"} if create else {"downloadMs", "decryptMs"}
+    if not _object_keys(value, phases | {"totalMs"}) or not _integer(value.get("totalMs"), 0, MAX_REPORTED_DURATION_MS):
+        raise ValueError("invalid performance report")
+    for key in phases:
+        if required and key not in value:
+            raise ValueError("invalid performance report")
+        if key in value and not _integer(value[key], 0, MAX_REPORTED_DURATION_MS):
+            raise ValueError("invalid performance report")
+
+
+def _validate_estimate(value: Any, rate_key: str) -> None:
+    if value is None:
+        return
+    if (not _object_keys(value, {rate_key, "sampleAgeMs"}) or rate_key not in value or "sampleAgeMs" not in value
+            or not _integer(value[rate_key], 1, MAX_REPORTED_BPS)
+            or not _integer(value["sampleAgeMs"], 0, 365 * 24 * 60 * 60 * 1000)):
+        raise ValueError("invalid performance report")
 
 
 def _json_object(payload: bytes) -> dict[str, Any]:

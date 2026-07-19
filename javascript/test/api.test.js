@@ -49,3 +49,61 @@ test("validates free limits, client identifiers, and canonical IDs", async () =>
   await assert.rejects(client.createMessage({ messageId: id, envelope: new Uint8Array(MAX_FREE_MESSAGE_BYTES + 1), deletionKey, expiresAt: now + 1 }), /3 MiB/);
   await assert.rejects(client.createMessage({ messageId: "0K7mQ2xR8VpC", envelope: Uint8Array.of(1), deletionKey, expiresAt: now + 1 }), /canonical/);
 });
+
+test("implements limits and measured network-test operations", async () => {
+  const calls = [];
+  const limits = { authenticated: false, plan: "anonymous", limits: {
+    messageBytes: 3145728, maxExpirySeconds: 1209600, devices: 0, apiKeys: 0,
+    messagesPerMinute: 3, uploadBytesPerHour: 31457280,
+    speedTestBytesPerRequest: 1048576, speedTestBytesPerHour: 10485760,
+  }, usage: null };
+  const fetch = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url.endsWith("/api/limits")) return Response.json(limits);
+    if (url.endsWith("/api/network-test/upload")) return Response.json({ receivedBytes: init.body.byteLength });
+    return new Response(new Uint8Array(64), { headers: { "content-length": "64", "cache-control": "no-store" } });
+  };
+  const client = new WipeClient({ fetch });
+  assert.deepEqual(await client.getLimits(), limits);
+  const upload = await client.testUploadSpeed(new Uint8Array(32));
+  const download = await client.testDownloadSpeed(64);
+  assert.equal(upload.receivedBytes, 32);
+  assert.ok(upload.bytesPerSecond > 0);
+  assert.equal(download.receivedBytes, 64);
+  assert.equal(download.data.byteLength, 64);
+  assert.ok(download.bytesPerSecond > 0);
+  assert.equal(calls[1].init.headers["content-type"], "application/octet-stream");
+  await assert.rejects(client.testDownloadSpeed(1048577), /1048576/);
+});
+
+test("submits only schema-valid privacy-safe performance reports", async () => {
+  let sent;
+  const fetch = async (_url, init) => {
+    sent = JSON.parse(init.body);
+    return Response.json({ accepted: true, id: "123e4567-e89b-42d3-a456-426614174000" }, { status: 201 });
+  };
+  const client = new WipeClient({ fetch });
+  const report = {
+    schemaVersion: 1, flow: "create", result: "success", encryptedBytes: 65536, plaintextBytes: 64000,
+    estimated: { encryptMs: 210, uploadMs: 800, totalMs: 1010 },
+    actual: { encryptMs: 225, uploadMs: 920, totalMs: 1145 },
+    completedBytes: { upload: 65536 },
+    networkEstimate: { uploadBytesPerSecond: 81920, sampleAgeMs: 12000 },
+    cryptoEstimate: { encryptBytesPerSecond: 5000000, sampleAgeMs: 60000 },
+    estimateModel: "client-baseline-v1",
+    client: { kind: "web", version: "0.4.0", platform: "desktop", browserFamily: "chrome" },
+  };
+  assert.equal((await client.submitPerformanceReport(report)).accepted, true);
+  assert.deepEqual(sent, report);
+  await assert.rejects(client.submitPerformanceReport({ ...report, messageId: id }), /invalid performance report/);
+});
+
+test("retrieval exposes authenticated headers before body progress", async () => {
+  const order = [];
+  const client = new WipeClient({ fetch: async () => new Response(Uint8Array.of(1, 2, 3), {
+    headers: { "content-length": "3", "x-wipe-content-hash": "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", "x-wipe-cipher-version": "1" },
+  }) });
+  await client.retrieveMessage(id, { onHeaders: (metadata) => order.push(["headers", metadata.totalBytes]), onProgress: () => order.push(["progress"]) });
+  assert.deepEqual(order[0], ["headers", 3]);
+  assert.equal(order.at(-1)[0], "progress");
+});

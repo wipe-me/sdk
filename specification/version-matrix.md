@@ -8,6 +8,7 @@ pre-release spelling differs, but the feature version has the same meaning.
 | 0.1 | `0.1.0-alpha.1` | `v0.1.0-alpha.1` | — | Links and opaque HTTP operations |
 | 0.2 | `0.2.0-alpha.1` | `v0.2.0-alpha.1` | — | Client-side v1 encryption |
 | 0.3 | `0.3.0-alpha.1` | `v0.3.0-alpha.1` | `0.3.0a1` | Configurable framing and byte progress |
+| 0.4 | `0.4.0-alpha.1` | `v0.4.0-alpha.1` | `0.4.0a1` | Limits, measured network tests, retrieval headers, and privacy-safe performance reports |
 
 Starting with train 0.3, a feature release advances all maintained language SDKs
 together after the shared fixtures pass. The encrypted wire format remains separately

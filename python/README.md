@@ -1,11 +1,11 @@
 # wipe-me
 
-The official Python SDK for Wipe.me. The synchronized 0.3 alpha supports the same
+The official Python SDK for Wipe.me. The synchronized 0.4 alpha supports the same
 v1 encryption, configurable framing, progress, link, and HTTP operations as the
 JavaScript and Go SDKs.
 
 ```bash
-python -m pip install --pre wipe-me==0.3.0a1
+python -m pip install --pre wipe-me==0.4.0a1
 ```
 
 ```python
@@ -27,7 +27,8 @@ opened = decrypt(download.body, message_id, secret)
 ```
 
 The synchronous client supports create, atomic one-time retrieve, idempotent delete,
-and health operations. Free anonymous messages are validated at 3 MiB and 14 days.
+health, effective-limit, bounded network-test, and privacy-safe performance-report
+operations. Free anonymous messages are validated at 3 MiB and 14 days.
 API failures raise `APIError` with `status`, stable `code`, human-readable `message`,
 and optional `retry_after` attributes.
 
@@ -37,3 +38,8 @@ default); physical network boundaries remain runtime-controlled.
 
 Crypto uses Argon2id, HKDF-SHA-256, and AES-256-GCM through `argon2-cffi` and
 PyCA `cryptography`. The fragment secret remains local and is never sent to the API.
+
+`limits()`, `test_upload_speed()`, and `test_download_speed()` expose the deployed
+capability endpoints; measured test results include elapsed seconds and bytes per second.
+`submit_performance_report()` validates the strict schema and 8 KiB privacy boundary
+before sending telemetry.

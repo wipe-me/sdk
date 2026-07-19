@@ -1,6 +1,14 @@
 """Wipe.me protocol and API SDK."""
 
-from .api import APIError, Client, CreateResult, RetrievedMessage
+from .api import (
+    APIError,
+    Client,
+    CreateResult,
+    DownloadTestResult,
+    PerformanceReportResult,
+    RetrievedMessage,
+    SpeedTestResult,
+)
 from .crypto import (
     AttachmentInput,
     DecryptedAttachment,
@@ -21,7 +29,10 @@ __all__ = [
     "APIError",
     "Client",
     "CreateResult",
+    "DownloadTestResult",
+    "PerformanceReportResult",
     "RetrievedMessage",
+    "SpeedTestResult",
     "AttachmentInput",
     "DecryptedAttachment",
     "DecryptedEnvelope",
@@ -39,4 +50,4 @@ __all__ = [
     "normalize_base58",
     "parse_private_link",
 ]
-__version__ = "0.3.0a1"
+__version__ = "0.4.0a1"

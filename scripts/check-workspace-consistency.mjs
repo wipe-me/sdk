@@ -29,5 +29,11 @@ if (openAPI.includes("name: X-Wipe-On-Read")) throw new Error("OpenAPI still exp
 for (const code of ["message_too_large", "message_claimed", "internal_error", "authentication_required", "replay_detected"]) {
   required(openAPI, `- ${code}`, "OpenAPI error vocabulary");
 }
+for (const operation of ["/api/limits", "/api/network-test/upload", "/api/network-test/download", "/api/performance-reports"]) {
+  required(openAPI, operation, "OpenAPI SDK capability operations");
+}
+for (const code of ["invalid_speed_test_size", "speed_test_rate_limited", "invalid_performance_report", "performance_report_rate_limited"]) {
+  required(openAPI, `- ${code}`, "OpenAPI capability error vocabulary");
+}
 
 console.log("CLI canonical SDK links and backend OpenAPI constants are consistent with SDK v1");

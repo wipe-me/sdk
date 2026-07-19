@@ -1,8 +1,8 @@
 # @wipe-me/sdk
 
 Browser and Node.js SDK for Wipe.me. The alpha provides client-side v1 envelope
-encryption/decryption, private-link helpers, deletion-key derivation, and the create,
-retrieve, delete, and health HTTP operations.
+encryption/decryption, private-link helpers, deletion-key derivation, message operations,
+effective-limit discovery, bounded network tests, and privacy-safe performance reports.
 
 ```sh
 npm install @wipe-me/sdk@next
@@ -39,6 +39,9 @@ All long operations accept `onProgress`; events contain `phase`, `processedBytes
 accept power-of-two `cryptoChunkBytes` from 64 KiB through 4 MiB. Transport reporting
 defaults to a logical 100 KiB threshold. Browser uploads can use
 `createXHRTransport()` for real upload progress; downloads consume response streams.
+`retrieveMessage(..., { onHeaders })` reports authenticated response metadata before
+the body is consumed. `getLimits()`, `testUploadSpeed()`, `testDownloadSpeed()`, and
+`submitPerformanceReport()` cover the 0.4 capability endpoints.
 
 The API receives only opaque encrypted bytes and derived capabilities. API failures
 throw `APIError` with `status`, stable `code`, human-readable `message`, and optional

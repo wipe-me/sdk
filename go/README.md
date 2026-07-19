@@ -3,7 +3,7 @@
 Go module for Wipe.me client-side encryption, private-link capabilities, and the
 opaque-message HTTP API, published with module-prefixed semantic-version tags.
 
-Current synchronized pre-release: `github.com/wipe-me/sdk/go@v0.3.0-alpha.1`.
+Current synchronized pre-release: `github.com/wipe-me/sdk/go@v0.4.0-alpha.1`.
 
 ```go
 var envelope bytes.Buffer
@@ -44,3 +44,8 @@ URL-fragment secrets or the obsolete `X-Wipe-On-Read` header.
 Production encryption always uses the fixed v1 Argon2id parameters. Readers accept
 only the bounded v1 fixture/production range. Attachments stream into encryption;
 decryption currently authenticates the complete free-tier envelope in memory.
+
+The 0.4 client also exposes `GetLimits`, `TestUploadSpeed`, `TestDownloadSpeed`, and
+`SubmitPerformanceReport`. Network-test results include locally measured duration and
+bytes per second. Performance reports are schema-validated and size-bounded before any
+request is sent.
